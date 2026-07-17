@@ -117,6 +117,14 @@ class Trader:
         fill = fills[-1] if fills else None
         if fill:
             self.risk.on_fill(fill, market, best.skill_name, game.espn_event_id)
+        fill_price = order.avg_fill_price or price
+        edge_cents = model_prob * 100 - fill_price
+        partial = " (partial)" if order.filled_contracts < sizing.contracts else ""
+        self.discord.notify(
+            f"ENTRY [{best.skill_name}] {side.upper()} {order.filled_contracts}x"
+            f"{partial} {market.market_ticker} @ {fill_price}c "
+            f"(fee {order.fee_cents}c, model_prob={model_prob:.2f}, "
+            f"edge≈{edge_cents:.1f}c)", level="info")
         self._write_trade_note(coid, best.skill_name, market, side, order,
                                price, model_prob, conditions, signal, game)
         self.open_trades[coid] = {

@@ -170,6 +170,15 @@ class TestApproval:
         assert outcome.decided_by == "autonomous"
         assert time.monotonic() - start < 0.5
 
+    def test_autonomous_mode_sends_no_notify_itself(self, bot):
+        """Regression: send_trade_card must not announce a trade before the
+        order is actually placed — that used to produce a false-positive
+        Discord message for orders that ended up unfilled. The real
+        notification is the trader's job, sent only after a confirmed fill."""
+        bot.mode = "autonomous"
+        bot.send_trade_card(card())
+        assert bot.transport.sent == []
+
 
 class TestQueue:
     def test_overflow_drops_oldest_droppable(self, bot):

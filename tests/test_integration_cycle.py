@@ -141,7 +141,7 @@ def system(tmp_path):
     analyst = Analyst(vault, broker, espn, discord=discord, env="demo",
                       paper_broker=broker)
     return dict(vault=vault, espn=espn, monitor=monitor, trader=trader,
-                analyst=analyst, broker=broker, risk=risk)
+                analyst=analyst, broker=broker, risk=risk, discord=discord)
 
 
 class TestFullPaperCycle:
@@ -159,6 +159,14 @@ class TestFullPaperCycle:
         assert disposition.startswith("traded:"), disposition
         assert len(trader.open_trades) == 1
         assert system["broker"].get_positions()[0].side == "yes"  # BOS leading, home-YES
+
+        # real post-fill Discord notification, with actual fill numbers —
+        # not the pre-fill "proposal" the old (buggy) implementation sent
+        sent = system["discord"].transport.sent
+        entry_notifies = [m for m in sent if m["text"].startswith("ENTRY [")]
+        assert len(entry_notifies) == 1
+        assert "garbage-time-mispricing" in entry_notifies[0]["text"]
+        assert f"{system['broker'].get_positions()[0].contracts}x" in entry_notifies[0]["text"]
 
         # trade note written with full snapshot
         trades = [n for n in vault.query(

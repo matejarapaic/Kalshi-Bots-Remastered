@@ -157,10 +157,12 @@ class DiscordBot:
     def send_trade_card(self, card: TradeCard,
                         timeout_s: float | None = None) -> ApprovalOutcome:
         if self.mode == "autonomous":
-            # notify-only: posted after placement by the trader; no buttons
-            self.notify(f"[autonomous] {card.skill_name} {card.action} "
-                        f"{card.sizing.contracts}x {card.market.market_ticker} "
-                        f"@ {card.sizing.limit_price}c", level="info")
+            # No notify here — this only decides whether the order is allowed
+            # to place. The actual "trade placed" notification (real fill
+            # price/quantity, not this proposal) is the trader's job, sent
+            # only once a fill is confirmed. Bug found 2026-07-17: this used
+            # to notify *before* place_order ran, so an order that ended up
+            # unfilled had already announced a trade that never happened.
             return ApprovalOutcome(decision="approved", decided_by="autonomous",
                                    decided_at=datetime.now(timezone.utc),
                                    card_message_id=None)

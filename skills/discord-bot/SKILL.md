@@ -29,7 +29,7 @@ Exceptions: `DiscordError` (base), `DiscordUnavailable` (send failed after retri
 ### Execution mode — ANSWERED (owner, 2026-07-17): autonomous on DEMO only
 1. **Owner decision 2026-07-17: `MODE=autonomous` while `KALSHI_ENV=demo`; prod requires re-answering the question** (enforced in code: the bot refuses autonomous+prod, with deliberately no override env var). Both modes remain specified:
    - `manual_approve`: order placed only on Approve click by an authorized role. Card expires after `APPROVAL_TIMEOUT_S` → the entry is **CANCELED, never auto-approved**, and the card edits to "expired."
-   - `autonomous`: cards become notify-only (posted after placement, no buttons).
+   - `autonomous`: `send_trade_card` approves immediately with no Discord message of its own — it only gates whether the order is *allowed* to place. The actual "trade placed" notification is sent by the trader, only after a fill is confirmed, using the real fill price/quantity/fee (never the proposed sizing). **Spec correction (2026-07-17):** an earlier implementation notified from inside `send_trade_card`, before `place_order` ran — an order that ended up unfilled had already announced a trade that never happened. Fixed: notification now strictly follows a confirmed fill.
 2. Timeouts (owner-confirmed 2026-07-17): `APPROVAL_TIMEOUT_LIVE_S=120` (live edges decay in minutes), `APPROVAL_TIMEOUT_PREGAME_S=600`.
 3. **Exits are NEVER approval-gated**, in either mode. A blocked exit is unbounded risk; invalidation-triggered exits execute immediately and post notify-only cards. (Restated from the trader's system prompt; enforced here by having no exit-approval path at all.)
 
