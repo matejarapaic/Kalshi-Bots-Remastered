@@ -11,11 +11,18 @@ The human interface: rich-embed trade cards with Approve/Reject buttons, slash c
 ```python
 send_trade_card(card: TradeCard) -> ApprovalOutcome   # blocks (async) until decision/timeout
 notify(message: str, level: Literal["info", "warn", "critical"]) -> None  # fire-and-forget
-# Slash commands (Discord-side handlers, not Python callables):
-#   /positions  /pnl  /skills  /slate  /halt <reason>  /resume
+handle_command(cmd: str, arg: str = "", user: str = "owner") -> str       # transport-agnostic
+# /positions /pnl /skills /slate /halt <reason> /resume are REAL Discord slash
+# commands (2026-07-17): registered + dispatched by kalshi_bots/discord_gateway.py
+# (discord.py gateway client), calling handle_command() above. Button clicks
+# (Approve/Reject) are handled the same way, via resolve_card().
 ```
 
 Exceptions: `DiscordError` (base), `DiscordUnavailable` (send failed after retries — meaningful only for approval cards; notify swallows it into the retry queue).
+
+**Two transport implementations exist** (`kalshi_bots/skills/discord_bot.py` / `kalshi_bots/discord_gateway.py`), both send-compatible drop-ins (`send(message: dict) -> str`):
+- `DiscordTransport` — REST API only. Can send messages; **cannot** receive slash commands or button clicks (no persistent connection). Sufficient for autonomous-mode notifications.
+- `GatewayTransport` — a real websocket connection (discord.py), running in its own asyncio loop on a background thread. Receives and dispatches both slash commands and button clicks. Required for `manual_approve` mode to be usable at all; the orchestrator prefers this whenever `DISCORD_BOT_TOKEN`+`DISCORD_CHANNEL_ID` are set, falling back to `DiscordTransport` if the gateway can't connect, then to `ConsoleTransport` if neither credential is present.
 
 ## Behavior
 
@@ -28,7 +35,7 @@ Exceptions: `DiscordError` (base), `DiscordUnavailable` (send failed after retri
 
 ### Trade cards
 4. Embed fields: skill name; market ticker + title; side + action; **every entry-condition number that justified the trade, with its timestamp** (the same snapshot the trade note records — supplied in `TradeCard.snapshot`); proposed contracts, limit price, fee estimate, `capped_by` from SizingResult; current book (bid/ask/depth); edge summary. Buttons: `Approve` / `Reject`, plus `Halt system` on `critical` notifies.
-5. Button authorization: only members with `APPROVER_ROLE_ID` may click; other clicks get an ephemeral "not authorized" and the card stays live. All decisions are logged (who, when) into the card thread and returned in `ApprovalOutcome`.
+5. Button authorization: only members with `APPROVER_ROLE_ID` may click; other clicks get an ephemeral "not authorized" and the card stays live. All decisions are logged (who, when) into the card thread and returned in `ApprovalOutcome`. **Spec deviation (2026-07-17):** if `APPROVER_ROLE_ID` is unset, the implementation fails OPEN (allows the click) rather than refusing to start — refusing to let anyone approve/halt because a role id was never configured was judged the worse failure mode for a single-operator system. `/halt` and `/resume` are gated by the same check (an extension beyond this spec's original button-only wording, since an unauthenticated halt/resume is the same class of risk).
 6. Idempotency: a card is bound to the trader's `client_order_id`; double-clicks or Discord retries cannot approve twice (first decision wins, recorded in the card).
 
 ### Blocking semantics (the documented exception)
@@ -44,11 +51,12 @@ Exceptions: `DiscordError` (base), `DiscordUnavailable` (send failed after retri
 ## Configuration
 | Parameter | Default | Notes |
 |---|---|---|
-| `MODE` | `manual_approve` | Category B: stays until owner answers the execution-mode question |
-| `APPROVAL_TIMEOUT_LIVE_S` | 120 | PROPOSED — confirm with risk numbers |
-| `APPROVAL_TIMEOUT_PREGAME_S` | 600 | PROPOSED |
+| `MODE` | `manual_approve` (class default) | Owner-decided 2026-07-17: the orchestrator explicitly requests `autonomous`, allowed only on demo |
+| `APPROVAL_TIMEOUT_LIVE_S` | 120 | owner-confirmed 2026-07-17 |
+| `APPROVAL_TIMEOUT_PREGAME_S` | 600 | owner-confirmed 2026-07-17 |
 | `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID` | — | env vars |
-| `APPROVER_ROLE_ID` | — | env var; no default, bot refuses to start in manual_approve without it |
+| `DISCORD_GUILD_ID` | — | env var; optional — enables instant (vs. ~1hr global) slash-command sync. Auto-detected if the bot is in exactly one guild. |
+| `APPROVER_ROLE_ID` | — | env var; unset = fails open (see rule 5 deviation), not a startup refusal |
 | `QUEUE_MAX` | 200 | overflow threshold |
 
 ## Edge cases

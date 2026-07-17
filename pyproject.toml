@@ -13,6 +13,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 serve = ["fastapi>=0.110", "uvicorn>=0.29", "websockets>=12.0"]
+# Real slash-command/button interactivity (kalshi_bots/discord_gateway.py).
+# Optional: the orchestrator lazy-imports this and falls back to a REST-only
+# or console transport when discord.py isn't installed.
 discord = ["discord.py>=2.3"]
 
 [tool.pytest.ini_options]

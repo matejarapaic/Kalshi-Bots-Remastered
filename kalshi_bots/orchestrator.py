@@ -71,12 +71,36 @@ class Orchestrator:
         # This orchestrator refuses non-demo envs at startup (above), and
         # DiscordBot separately refuses autonomous+prod — flipping to prod
         # requires re-answering the execution-mode question.
+        #
+        # Transport cascade: GatewayTransport (full — sends + receives slash
+        # commands/button clicks) > DiscordTransport (REST, send-only, if the
+        # gateway can't connect) > ConsoleTransport (local log only).
         discord_token = os.environ.get("DISCORD_BOT_TOKEN")
         discord_channel = os.environ.get("DISCORD_CHANNEL_ID")
-        transport = (DiscordTransport(discord_token, discord_channel)
-                     if discord_token and discord_channel else ConsoleTransport())
+        discord_guild = os.environ.get("DISCORD_GUILD_ID")
+        gateway = None
+        if discord_token and discord_channel:
+            try:
+                from kalshi_bots.discord_gateway import GatewayTransport  # optional [discord] extra
+                gateway = GatewayTransport(discord_token, discord_channel, discord_guild)
+            except ImportError as e:
+                log.warning("discord.py not installed (%s) — falling back to "
+                           "REST-only transport; `pip install discord.py` for "
+                           "slash commands/buttons", e)
+        transport = gateway or (DiscordTransport(discord_token, discord_channel)
+                                if discord_token and discord_channel else ConsoleTransport())
         self.discord = DiscordBot(self.risk, self.vault, transport=transport,
                                   mode="autonomous")
+        if gateway is not None:
+            gateway.bind(self.discord)  # bind before start: no window with bot_ref unset
+            try:
+                gateway.start()
+                log.info("Discord gateway connected — slash commands and "
+                        "approval buttons are live")
+            except Exception as e:
+                log.warning("Discord gateway failed to connect (%s) — falling "
+                           "back to REST-only transport", e)
+                self.discord.transport = DiscordTransport(discord_token, discord_channel)
         self.monitor = GameMonitor(self.vault, self.espn, self.matcher,
                                    kalshi=self.kalshi, odds=self.odds)
         self.trader = Trader(self.vault, self.broker, self.matcher, self.risk,

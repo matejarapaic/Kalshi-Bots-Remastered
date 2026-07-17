@@ -62,9 +62,13 @@ class DiscordTransport:
     token. Send-only — there is no gateway (websocket) connection here, so
     button clicks and slash-command invocations are NOT received; approval
     cards render as plain text and `resolve_card` must still be driven some
-    other way (dashboard/console) until a gateway-based transport exists.
-    Sufficient for autonomous-mode notifications (trade fills, halts, critical
-    alerts); manual-approve mode needs the full interactive bot to be useful.
+    other way (dashboard/console). Sufficient for autonomous-mode
+    notifications (trade fills, halts, critical alerts); manual-approve mode
+    needs real interactivity to be useful — see GatewayTransport in
+    kalshi_bots/discord_gateway.py (a gateway-based transport, added
+    2026-07-17), which the orchestrator prefers whenever credentials are
+    present, falling back to this REST-only transport if the gateway can't
+    connect.
     """
 
     API = "https://discord.com/api/v10"
