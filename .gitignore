@@ -8,3 +8,4 @@ __pycache__/
 *.key
 secrets/
 .pytest_cache/
+.claude/skills/
