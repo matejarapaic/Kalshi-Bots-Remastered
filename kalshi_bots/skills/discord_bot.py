@@ -61,6 +61,12 @@ class DiscordBot:
         self.mode = mode or os.environ.get("KALSHI_EXEC_MODE", "manual_approve")
         if self.mode not in ("manual_approve", "autonomous"):
             raise DiscordError(f"bad MODE {self.mode!r}")
+        # Owner decision 2026-07-17: autonomous is authorized for DEMO ONLY.
+        # Prod autonomy requires the owner to re-answer the execution-mode
+        # question (Category B) — there is deliberately no env var to skip this.
+        if self.mode == "autonomous" and os.environ.get("KALSHI_ENV", "demo") == "prod":
+            raise DiscordError("autonomous mode is authorized on demo only; "
+                               "prod requires re-answering the execution-mode question")
         self._pending: dict[str, dict] = {}   # client_order_id -> state
         self._plock = threading.Lock()
         self._queue: deque = deque()

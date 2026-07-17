@@ -19,8 +19,8 @@ Exceptions: `DiscordError` (base), `DiscordUnavailable` (send failed after retri
 
 ## Behavior
 
-### Execution mode — Category B, still OPEN
-1. **Manual-approve vs. autonomous is an unanswered owner decision.** Until it is explicitly answered, `MODE=manual_approve` and ALL orders — demo included — require card approval. Both modes are specified so flipping is one config change:
+### Execution mode — ANSWERED (owner, 2026-07-17): autonomous on DEMO only
+1. **Owner decision 2026-07-17: `MODE=autonomous` while `KALSHI_ENV=demo`; prod requires re-answering the question** (enforced in code: the bot refuses autonomous+prod, with deliberately no override env var). Both modes remain specified:
    - `manual_approve`: order placed only on Approve click by an authorized role. Card expires after `APPROVAL_TIMEOUT_S` → the entry is **CANCELED, never auto-approved**, and the card edits to "expired."
    - `autonomous`: cards become notify-only (posted after placement, no buttons).
 2. Timeouts (owner-confirmed 2026-07-17): `APPROVAL_TIMEOUT_LIVE_S=120` (live edges decay in minutes), `APPROVAL_TIMEOUT_PREGAME_S=600`.

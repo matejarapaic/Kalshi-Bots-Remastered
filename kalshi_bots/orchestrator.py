@@ -43,8 +43,13 @@ class Orchestrator:
         self.espn = EspnData(self.vault)
         self.matcher = LeagueMatcher(self.vault, self.kalshi)
         self.risk = RiskManager(self.vault, self.broker)
+        # Execution mode, owner-decided 2026-07-17: AUTONOMOUS ON DEMO ONLY.
+        # This orchestrator refuses non-demo envs at startup (above), and
+        # DiscordBot separately refuses autonomous+prod — flipping to prod
+        # requires re-answering the execution-mode question.
         self.discord = DiscordBot(self.risk, self.vault,
-                                  transport=ConsoleTransport())
+                                  transport=ConsoleTransport(),
+                                  mode="autonomous")
         self.monitor = GameMonitor(self.vault, self.espn, self.matcher,
                                    kalshi=self.kalshi)
         self.trader = Trader(self.vault, self.broker, self.matcher, self.risk,
