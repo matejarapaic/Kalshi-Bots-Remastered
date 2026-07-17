@@ -18,7 +18,7 @@ from kalshi_bots.agents.game_monitor import GameMonitor
 from kalshi_bots.agents.trader import Trader
 from kalshi_bots.env import load_env
 from kalshi_bots.paper import PaperBroker
-from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot
+from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot, DiscordTransport
 from kalshi_bots.skills.espn_data import EspnData
 from kalshi_bots.skills.kalshi_client import KalshiClient
 from kalshi_bots.skills.league_matching import LeagueMatcher
@@ -71,8 +71,11 @@ class Orchestrator:
         # This orchestrator refuses non-demo envs at startup (above), and
         # DiscordBot separately refuses autonomous+prod — flipping to prod
         # requires re-answering the execution-mode question.
-        self.discord = DiscordBot(self.risk, self.vault,
-                                  transport=ConsoleTransport(),
+        discord_token = os.environ.get("DISCORD_BOT_TOKEN")
+        discord_channel = os.environ.get("DISCORD_CHANNEL_ID")
+        transport = (DiscordTransport(discord_token, discord_channel)
+                     if discord_token and discord_channel else ConsoleTransport())
+        self.discord = DiscordBot(self.risk, self.vault, transport=transport,
                                   mode="autonomous")
         self.monitor = GameMonitor(self.vault, self.espn, self.matcher,
                                    kalshi=self.kalshi, odds=self.odds)

@@ -2,11 +2,75 @@ import threading
 import time
 
 import pytest
+import requests
 
-from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot
+from kalshi_bots.skills.discord_bot import (
+    ConsoleTransport, DiscordBot, DiscordTransport, DiscordUnavailable,
+)
 from kalshi_bots.skills.risk_management import RiskManager
 from kalshi_bots.skills.vault import Vault
 from kalshi_bots.types import MarketRef, SizingResult, TradeCard
+
+
+class FakeResponse:
+    def __init__(self, status_code, json_body=None, text=""):
+        self.status_code = status_code
+        self._json = json_body or {}
+        self.text = text
+
+    def json(self):
+        return self._json
+
+
+class FakeSession:
+    def __init__(self, response=None, exc=None):
+        self.headers = {}
+        self.response = response
+        self.exc = exc
+        self.calls = []
+
+    def post(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        if self.exc:
+            raise self.exc
+        return self.response
+
+
+class TestDiscordTransport:
+    def test_send_success_returns_message_id(self):
+        session = FakeSession(response=FakeResponse(200, {"id": "999"}))
+        t = DiscordTransport("tok", "chan1", session=session)
+        msg_id = t.send({"text": "hello world"})
+        assert msg_id == "999"
+        assert session.headers["Authorization"] == "Bot tok"
+        url, body = session.calls[0]
+        assert url == "https://discord.com/api/v10/channels/chan1/messages"
+        assert body == {"content": "hello world"}
+
+    def test_truncates_to_discord_max_length(self):
+        session = FakeSession(response=FakeResponse(200, {"id": "1"}))
+        t = DiscordTransport("tok", "chan1", session=session)
+        t.send({"text": "x" * 5000})
+        _, body = session.calls[0]
+        assert len(body["content"]) == 2000
+
+    def test_rate_limited_raises_unavailable(self):
+        session = FakeSession(response=FakeResponse(429, text="slow down"))
+        t = DiscordTransport("tok", "chan1", session=session)
+        with pytest.raises(DiscordUnavailable):
+            t.send({"text": "x"})
+
+    def test_http_error_raises_unavailable(self):
+        session = FakeSession(response=FakeResponse(403, text="forbidden"))
+        t = DiscordTransport("tok", "chan1", session=session)
+        with pytest.raises(DiscordUnavailable):
+            t.send({"text": "x"})
+
+    def test_network_failure_raises_unavailable(self):
+        session = FakeSession(exc=requests.ConnectionError("no route"))
+        t = DiscordTransport("tok", "chan1", session=session)
+        with pytest.raises(DiscordUnavailable):
+            t.send({"text": "x"})
 
 
 class FakeKalshi:

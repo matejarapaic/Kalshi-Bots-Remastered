@@ -5,10 +5,12 @@ abstracted: DiscordTransport (real, needs discord.py + token) or any object
 implementing the same interface (console/test transports) — the approval,
 timeout, queue, and idempotency logic here is transport-independent.
 
-Execution mode is Category B and still OPEN: MODE defaults to manual_approve;
-ALL orders (demo included) require card approval until the owner answers.
-Expiry CANCELS, never auto-approves. Exits are never approval-gated (there is
-no exit-approval path at all).
+Execution mode (owner-decided 2026-07-17): autonomous on demo only. This
+class's own default is still the conservative `manual_approve` (see MODE
+below) — the orchestrator is what explicitly requests `autonomous` and only
+succeeds because KALSHI_ENV=demo; the same class refuses autonomous+prod
+outright (see __init__). Expiry CANCELS, never auto-approves. Exits are never
+approval-gated (there is no exit-approval path at all).
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
+
+import requests
 
 from kalshi_bots.types import ApprovalOutcome, TradeCard
 
@@ -51,6 +55,40 @@ class ConsoleTransport:
         msg_id = f"console-{len(self.sent)}"
         log.info("[%s] %s", message.get("level", "card"), message.get("text", "")[:200])
         return msg_id
+
+
+class DiscordTransport:
+    """Real transport: posts messages via Discord's REST API using the bot
+    token. Send-only — there is no gateway (websocket) connection here, so
+    button clicks and slash-command invocations are NOT received; approval
+    cards render as plain text and `resolve_card` must still be driven some
+    other way (dashboard/console) until a gateway-based transport exists.
+    Sufficient for autonomous-mode notifications (trade fills, halts, critical
+    alerts); manual-approve mode needs the full interactive bot to be useful.
+    """
+
+    API = "https://discord.com/api/v10"
+    DISCORD_MAX_LEN = 2000
+
+    def __init__(self, token: str, channel_id: str,
+                 session: requests.Session | None = None):
+        self.channel_id = channel_id
+        self.session = session or requests.Session()
+        self.session.headers["Authorization"] = f"Bot {token}"
+
+    def send(self, message: dict) -> str:
+        text = message.get("text", "")[: self.DISCORD_MAX_LEN]
+        try:
+            r = self.session.post(
+                f"{self.API}/channels/{self.channel_id}/messages",
+                json={"content": text}, timeout=15)
+        except requests.RequestException as e:
+            raise DiscordUnavailable(f"request failed: {e}") from e
+        if r.status_code == 429:
+            raise DiscordUnavailable("rate limited")
+        if r.status_code >= 300:
+            raise DiscordUnavailable(f"HTTP {r.status_code}: {r.text[:200]}")
+        return str(r.json()["id"])
 
 
 class DiscordBot:
