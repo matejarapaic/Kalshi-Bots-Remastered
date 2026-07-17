@@ -86,7 +86,7 @@ None (foundation skill). Called by: league-matching, risk-management, trader age
 - Fee: `est_fee_cents` table vs. hand-computed values at 1/50/99¢ × 1/100/1000 contracts; ceiling behavior at sub-cent boundaries.
 - Dollar-string → cents conversion: `"0.4400"`→44, `"0.0100"`→1, fractional quantity floors.
 - Prod refusal: `KALSHI_ENV=prod` without the flag raises at construction.
-- Signing: known-key fixture reproducing a reference signature (byte-for-byte vs. a captured kalshi.js signature).
+- Signing: known-key fixture whose signature *verifies* against the public key over the exact message `timestamp+METHOD+path` with the query string stripped. (Spec deviation, flagged 2026-07-17: RSA-PSS salts are random, so byte-for-byte reproduction is impossible; cryptographic verification is the correct equivalent.)
 
 ## New types
 ```python

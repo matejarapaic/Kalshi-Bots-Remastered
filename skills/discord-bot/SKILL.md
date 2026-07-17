@@ -23,7 +23,7 @@ Exceptions: `DiscordError` (base), `DiscordUnavailable` (send failed after retri
 1. **Manual-approve vs. autonomous is an unanswered owner decision.** Until it is explicitly answered, `MODE=manual_approve` and ALL orders — demo included — require card approval. Both modes are specified so flipping is one config change:
    - `manual_approve`: order placed only on Approve click by an authorized role. Card expires after `APPROVAL_TIMEOUT_S` → the entry is **CANCELED, never auto-approved**, and the card edits to "expired."
    - `autonomous`: cards become notify-only (posted after placement, no buttons).
-2. Proposed timeouts (**flagged for owner confirmation with the risk numbers**): `APPROVAL_TIMEOUT_LIVE_S=120` (live edges decay in minutes), `APPROVAL_TIMEOUT_PREGAME_S=600`.
+2. Timeouts (owner-confirmed 2026-07-17): `APPROVAL_TIMEOUT_LIVE_S=120` (live edges decay in minutes), `APPROVAL_TIMEOUT_PREGAME_S=600`.
 3. **Exits are NEVER approval-gated**, in either mode. A blocked exit is unbounded risk; invalidation-triggered exits execute immediately and post notify-only cards. (Restated from the trader's system prompt; enforced here by having no exit-approval path at all.)
 
 ### Trade cards

@@ -37,15 +37,14 @@ Exceptions: `RiskError` (base — infra only: ledger unreadable, balance fetch f
 | `CAP_GARBAGE_PCT` | 5 | |
 | `CAP_GARBAGE_AGG_PCT` | 10 | simultaneous garbage-time across all games |
 
-### PROPOSED — pending owner confirmation at the Phase 2 checkpoint
-*(The build plan's default was "carry over the old bot's numbers," but no old-bot code exists on disk, so these are fresh proposals and are NOT in force until confirmed.)*
-| Name | Proposed | Meaning |
+### Owner-confirmed 2026-07-17 (Phase 2 checkpoint — "tighter variant" selected)
+| Name | Value | Meaning |
 |---|---|---|
-| `TOTAL_EXPOSURE_CAP_PCT` | 25 | all open positions, % of bankroll |
-| `PER_GAME_EXPOSURE_CAP_PCT` | 10 | all skills/markets on one game |
+| `TOTAL_EXPOSURE_CAP_PCT` | 15 | all open positions, % of bankroll |
+| `PER_GAME_EXPOSURE_CAP_PCT` | 5 | all skills/markets on one game (one full-size position per game by design) |
 | `CORRELATION_SCALE_SAME_GAME` | 0.5 | 2nd+ position on a game is sized after ×0.5; correlated same-team markets count as same-game |
-| `DAILY_LOSS_HALT_PCT` | 10 | realized daily loss ≥ this → no new entries until next ET day; exits unaffected |
-| `MAX_OPEN_POSITIONS` | 10 | across the system |
+| `DAILY_LOSS_HALT_PCT` | 5 | realized daily loss ≥ this → no new entries until next ET day; exits unaffected |
+| `MAX_OPEN_POSITIONS` | 6 | across the system |
 | `DEPTH_CONSUMPTION_MAX` | 0.25 | an order may consume ≤25% of book depth within 2¢ of entry |
 
 ## Behavior
