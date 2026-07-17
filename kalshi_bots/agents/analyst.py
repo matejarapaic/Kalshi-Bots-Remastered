@@ -6,10 +6,10 @@ next-day slate preview. Never on the live path.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from kalshi_bots.skills.postmortem import Postmortem, SettlementMismatch
-from kalshi_bots.timefmt import fmt_et
+from kalshi_bots.timefmt import ET, fmt_et
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,11 @@ class Analyst:
 
     def nightly_slate(self, leagues: list[str], for_day: date | None = None):
         """Next-day slate preview for game-monitor."""
-        day = for_day or (date.today() + timedelta(days=1))
+        # ET calendar day, matching the rest of the system's convention (the
+        # orchestrator's poll loop, league-matching's per-day cache) — NOT
+        # date.today(), which is the host machine's local timezone.
+        today_et = datetime.now(timezone.utc).astimezone(ET).date()
+        day = for_day or (today_et + timedelta(days=1))
         lines = [f"# Slate preview {day.isoformat()}", ""]
         for league in leagues:
             try:
@@ -57,7 +61,9 @@ class Analyst:
             except Exception as e:
                 lines.append(f"- {league}: scoreboard unavailable ({e})")
                 continue
-            upcoming = [g for g in games if g.start_time.date() == day]
+            # Compare in ET, not UTC: a 10:40 PM ET start is already the next
+            # calendar day in UTC and would otherwise land in the wrong preview.
+            upcoming = [g for g in games if g.start_time.astimezone(ET).date() == day]
             lines.append(f"## {league.upper()} — {len(upcoming)} games")
             for g in upcoming:
                 lines.append(f"- {g.away.espn_abbr} @ {g.home.espn_abbr} "
