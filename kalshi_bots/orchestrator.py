@@ -16,14 +16,17 @@ from zoneinfo import ZoneInfo
 from kalshi_bots.agents.analyst import Analyst
 from kalshi_bots.agents.game_monitor import GameMonitor
 from kalshi_bots.agents.trader import Trader
+from kalshi_bots.env import load_env
 from kalshi_bots.paper import PaperBroker
 from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot
 from kalshi_bots.skills.espn_data import EspnData
 from kalshi_bots.skills.kalshi_client import KalshiClient
 from kalshi_bots.skills.league_matching import LeagueMatcher
+from kalshi_bots.skills.odds_api import OddsApi
 from kalshi_bots.skills.risk_management import RiskManager
 from kalshi_bots.skills.vault import Vault
 
+load_env()
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
@@ -31,18 +34,39 @@ LIVE_POLL_S = 20  # league-config ramp: live cadence
 
 
 class Orchestrator:
-    def __init__(self, leagues: list[str] | None = None, paper: bool = True,
-                 vault: Vault | None = None):
+    def __init__(self, leagues: list[str] | None = None,
+                 paper: bool | None = None, vault: Vault | None = None):
+        """paper=None auto-detects: real demo-exchange execution if
+        KALSHI_KEY_ID/KALSHI_KEY_PATH authenticate successfully, else falls
+        back to PaperBroker simulation. Pass True/False to force either mode
+        regardless of credentials."""
         env = os.environ.get("KALSHI_ENV", "demo")
         if env != "demo":
             raise RuntimeError("orchestrator refuses to start: KALSHI_ENV must be "
                                "demo until the Phase 3 final checkpoint")
         self.vault = vault or Vault()
         self.kalshi = KalshiClient()
+        if paper is None:
+            try:
+                self.kalshi.get_balance()
+                paper = False
+                log.info("Kalshi demo credentials verified — using real "
+                        "demo-exchange execution")
+            except Exception as e:
+                paper = True
+                log.warning("Kalshi demo auth unavailable (%s) — falling back "
+                           "to PaperBroker simulation", e)
         self.broker = PaperBroker(self.kalshi) if paper else self.kalshi
         self.espn = EspnData(self.vault)
         self.matcher = LeagueMatcher(self.vault, self.kalshi)
+        # odds-api is optional: divergence/injury skills stay dormant (no
+        # candidates emitted) without a key, rather than failing startup.
+        self.odds = OddsApi(self.vault) if os.environ.get("ODDS_API_KEY") else None
         self.risk = RiskManager(self.vault, self.broker)
+        try:
+            self.risk.reconcile()
+        except Exception as e:
+            log.warning("startup ledger reconcile skipped: %s", e)
         # Execution mode, owner-decided 2026-07-17: AUTONOMOUS ON DEMO ONLY.
         # This orchestrator refuses non-demo envs at startup (above), and
         # DiscordBot separately refuses autonomous+prod — flipping to prod
@@ -51,7 +75,7 @@ class Orchestrator:
                                   transport=ConsoleTransport(),
                                   mode="autonomous")
         self.monitor = GameMonitor(self.vault, self.espn, self.matcher,
-                                   kalshi=self.kalshi)
+                                   kalshi=self.kalshi, odds=self.odds)
         self.trader = Trader(self.vault, self.broker, self.matcher, self.risk,
                              self.discord, env="demo")
         self.analyst = Analyst(self.vault, self.broker, self.espn,
