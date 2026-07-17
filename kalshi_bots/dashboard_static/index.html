@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalshi Bots — Live Trading Dashboard</title>
+<!-- Typography: ui-ux-pro-max design-system recommendation (Fira Code / Fira Sans) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   Design tokens — traceable to ui-ux-pro-max output:
+   - COLORS block of --design-system "trading dashboard real-time
+     financial data" (Dark Mode OLED)
+   - style "Data-Dense Dashboard" Design System Variables
+   - style "Financial Dashboard" profit/loss colors
+   - chart "Real-Time Streaming" pulse color (dark theme)
+   ============================================================ */
+:root {
+  --color-primary: #0F172A;
+  --color-on-primary: #FFFFFF;
+  --color-secondary: #1E293B;
+  --color-accent: #22C55E;
+  --color-background: #020617;
+  --color-foreground: #F8FAFC;
+  --color-muted: #1A1E2F;
+  --color-border: #334155;
+  --color-destructive: #EF4444;
+  --profit-color: #22C55E;       /* Financial Dashboard style */
+  --loss-color: #EF4444;
+  --pulse-color: #00FF00;        /* Real-Time Streaming chart, dark theme */
+  --text-muted: #94A3B8;         /* slate-400: same slate ramp as palette */
+  --grid-gap: 8px;               /* Data-Dense Dashboard variables */
+  --card-padding: 12px;
+  --font-size-small: 12px;
+  --table-row-height: 36px;
+  --header-height: 56px;
+  --font-data: "Fira Code", ui-monospace, monospace;
+  --font-ui: "Fira Sans", system-ui, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+}
+button { font: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* ---- header (sticky, 56px per --header-height) ---- */
+header {
+  position: sticky; top: 0; z-index: 40;
+  height: var(--header-height);
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 16px;
+  background: var(--color-primary);
+  border-bottom: 1px solid var(--color-border);
+}
+header h1 {
+  font-family: var(--font-data);
+  font-size: 15px; font-weight: 600; letter-spacing: 0.08em;
+}
+.badge {
+  font-family: var(--font-data);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  padding: 2px 8px; border-radius: 4px;
+}
+.badge-env { background: rgba(34,197,94,.15); color: var(--color-accent); border: 1px solid rgba(34,197,94,.4); }
+.badge-halt { background: rgba(239,68,68,.15); color: var(--color-destructive); border: 1px solid rgba(239,68,68,.5); display: none; }
+.conn { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: var(--font-size-small); color: var(--text-muted); }
+.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-destructive); }
+.conn-dot.live { background: var(--color-accent); box-shadow: 0 0 10px rgba(34,197,94,.6); } /* minimal glow per KEY EFFECTS */
+@media (prefers-reduced-motion: no-preference) {
+  .conn-dot.live { animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+}
+.icon-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 32px; padding: 4px 10px;
+  background: var(--color-secondary); color: var(--color-foreground);
+  border: 1px solid var(--color-border); border-radius: 6px;
+  font-size: var(--font-size-small);
+  transition: background 150ms ease-out;
+}
+.icon-btn:hover { background: var(--color-muted); }
+.icon-btn svg { width: 14px; height: 14px; }
+
+/* ---- 12-column dense grid (Data-Dense Dashboard) ---- */
+main {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--grid-gap);
+  padding: var(--grid-gap) 16px 24px;
+  max-width: 1600px; margin: 0 auto;
+}
+.card {
+  background: var(--color-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: var(--card-padding);
+  min-width: 0;
+}
+.card h2 {
+  font-size: var(--font-size-small); font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 8px;
+}
+
+/* ---- KPI cards row (pattern: key metrics first) ---- */
+.kpi { grid-column: span 3; }
+.kpi .label { font-size: var(--font-size-small); color: var(--text-muted); letter-spacing: .06em; text-transform: uppercase; }
+.kpi .value {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: 26px; font-weight: 600; line-height: 1.25;
+}
+.kpi .sub { font-family: var(--font-data); font-size: var(--font-size-small); color: var(--text-muted); }
+.pos { color: var(--profit-color); }
+.neg { color: var(--loss-color); }
+.trend { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; }
+
+/* ---- chart card (Real-Time Streaming) ---- */
+.chart-card { grid-column: span 8; }
+.chart-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.chart-now {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-size: 22px; font-weight: 600;
+}
+canvas { width: 100%; height: 180px; display: block; }
+
+/* ---- exposure card ---- */
+.expo-card { grid-column: span 4; }
+.bar-row { display: flex; align-items: center; gap: 8px; height: 24px; font-size: var(--font-size-small); }
+.bar-row .name { font-family: var(--font-data); width: 44%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { flex: 1; height: 6px; background: var(--color-muted); border-radius: 3px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--color-accent); border-radius: 3px; }
+.bar-row .amt { font-family: var(--font-data); font-variant-numeric: tabular-nums; width: 64px; text-align: right; }
+
+/* ---- tables (sticky headers, 36px rows) ---- */
+.trades-card { grid-column: span 7; }
+.feed-card { grid-column: span 5; }
+.table-wrap { overflow: auto; max-height: 340px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--color-secondary);
+  color: var(--text-muted);
+  font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  text-align: left; padding: 6px 8px;
+}
+tbody td {
+  height: var(--table-row-height);
+  padding: 0 8px;
+  border-top: 1px solid var(--color-muted);
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+tbody tr:hover { background: var(--color-muted); }
+td.num, th.num { text-align: right; }
+.chip {
+  font-family: var(--font-data); font-size: 11px; font-weight: 500;
+  padding: 1px 7px; border-radius: 4px; border: 1px solid var(--color-border);
+  background: var(--color-secondary);
+}
+.chip.yes { color: var(--profit-color); border-color: rgba(34,197,94,.4); }
+.chip.no  { color: var(--loss-color); border-color: rgba(239,68,68,.4); }
+
+/* ---- live feed (Ticker Tape secondary option) ---- */
+.feed { list-style: none; padding: 0; max-height: 340px; overflow: auto; }
+.feed li {
+  display: flex; gap: 8px; align-items: baseline;
+  min-height: var(--table-row-height); padding: 6px 4px;
+  border-top: 1px solid var(--color-muted);
+  font-size: var(--font-size-small);
+}
+.feed time { font-family: var(--font-data); color: var(--text-muted); flex: 0 0 58px; }
+.kind { flex: 0 0 auto; }
+.kind-signal      { color: #FACC15; }
+.kind-disposition { color: var(--color-accent); }
+.kind-cycle       { color: var(--text-muted); }
+.feed .detail { color: var(--color-foreground); overflow-wrap: anywhere; }
+
+.empty { color: var(--text-muted); font-size: 13px; padding: 16px 4px; }
+
+@media (max-width: 1024px) {
+  .kpi { grid-column: span 6; }
+  .chart-card, .expo-card, .trades-card, .feed-card { grid-column: span 12; }
+}
+@media (max-width: 480px) { .kpi { grid-column: span 12; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>KALSHI&nbsp;BOTS</h1>
+  <span class="badge badge-env" id="env-badge">DEMO</span>
+  <span class="badge badge-halt" id="halt-badge" role="status">HALTED</span>
+  <div class="conn">
+    <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
+    <span id="conn-text">connecting…</span>
+    <button class="icon-btn" id="pause-btn" aria-pressed="false" aria-label="Pause live stream">
+      <svg id="pause-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+      <span id="pause-text">Pause</span>
+    </button>
+  </div>
+</header>
+
+<main>
+  <!-- KPI row: key metrics first (Real-Time/Operations pattern §2) -->
+  <section class="card kpi" aria-label="Bankroll">
+    <div class="label">Bankroll</div>
+    <div class="value" id="kpi-bankroll">—</div>
+    <div class="sub" id="kpi-env-sub">demo exchange</div>
+  </section>
+  <section class="card kpi" aria-label="Daily realized profit and loss">
+    <div class="label">Daily P&amp;L</div>
+    <div class="value" id="kpi-pnl">—</div>
+    <div class="sub" id="kpi-pnl-sub">realized, ET day</div>
+  </section>
+  <section class="card kpi" aria-label="Open exposure">
+    <div class="label">Open Exposure</div>
+    <div class="value" id="kpi-expo">—</div>
+    <div class="sub" id="kpi-expo-sub">of bankroll at risk</div>
+  </section>
+  <section class="card kpi" aria-label="Open positions">
+    <div class="label">Open Positions</div>
+    <div class="value" id="kpi-pos">—</div>
+    <div class="sub">max 6 (risk cap)</div>
+  </section>
+
+  <!-- Streaming area chart: current value as large text KPI + pause control -->
+  <section class="card chart-card" aria-label="Daily profit and loss stream">
+    <h2>Daily P&amp;L — live stream <span style="text-transform:none;letter-spacing:0">(last 5 min)</span></h2>
+    <div class="chart-head">
+      <span class="chart-now" id="chart-now" aria-live="off">—</span>
+      <span class="sub" id="chart-status" style="color:var(--text-muted);font-size:12px"></span>
+    </div>
+    <canvas id="pnl-chart" width="900" height="180" role="img"
+            aria-label="Streaming area chart of daily realized profit and loss over the last five minutes. Current value is shown as text above."></canvas>
+  </section>
+
+  <!-- Exposure breakdown -->
+  <section class="card expo-card">
+    <h2>Exposure by skill</h2>
+    <div id="expo-skill"><div class="empty">No open exposure.</div></div>
+    <h2 style="margin-top:12px">Exposure by game</h2>
+    <div id="expo-game"><div class="empty">No open exposure.</div></div>
+  </section>
+
+  <!-- Open trades: dense sortable-style table, sticky header -->
+  <section class="card trades-card">
+    <h2>Open trades</h2>
+    <div class="table-wrap">
+      <table id="trades-table">
+        <thead><tr>
+          <th>Market</th><th>Skill</th><th>Side</th>
+          <th class="num">Qty</th><th class="num">Entry ¢</th><th>League</th><th>Game</th>
+        </tr></thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+      <div class="empty" id="trades-empty">No open positions — watching the slate.</div>
+    </div>
+  </section>
+
+  <!-- Live event feed (ticker tape) -->
+  <section class="card feed-card">
+    <h2>Live signals &amp; activity</h2>
+    <ul class="feed" id="feed" aria-live="polite" aria-relevant="additions"></ul>
+    <div class="empty" id="feed-empty">Waiting for the first cycle…</div>
+  </section>
+</main>
+
+<script>
+"use strict";
+/* Presentation layer only. Consumes the existing backend contract untouched:
+   GET /api/state  and  WS /ws (events carry sport/league/game_id/signal_type). */
+
+const $ = (id) => document.getElementById(id);
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+const cents = (c) => usd.format((c || 0) / 100);
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+let paused = false;
+const chartBuf = [];              // {t, v} — buffer last 300s (chart guidance)
+const BUFFER_S = 300;
+
+/* ---------- number count-up (Financial Dashboard effect) ---------- */
+function setMoney(el, centsVal, colored) {
+  const target = (centsVal || 0) / 100;
+  const finish = () => {
+    el.textContent = usd.format(target);
+    if (colored) el.className = "value " + (centsVal > 0 ? "pos" : centsVal < 0 ? "neg" : "");
+  };
+  if (reducedMotion || el.dataset.v === undefined) { el.dataset.v = target; finish(); return; }
+  const from = parseFloat(el.dataset.v) || 0;
+  el.dataset.v = target;
+  const t0 = performance.now(), dur = 300;               // 150–300ms micro-interaction
+  (function step(t) {
+    const k = Math.min(1, (t - t0) / dur);
+    const eased = 1 - Math.pow(1 - k, 3);                 // ease-out for entering values
+    el.textContent = usd.format(from + (target - from) * eased);
+    if (k < 1) requestAnimationFrame(step); else finish();
+  })(t0);
+}
+
+/* ---------- state polling (existing /api/state endpoint) ---------- */
+async function refreshState() {
+  let s;
+  try {
+    const r = await fetch("/api/state");
+    s = await r.json();
+  } catch { setConn(false, "state fetch failed — retrying"); return; }
+
+  $("env-badge").textContent = (s.env || "demo").toUpperCase();
+  const e = s.exposure || {};
+  $("halt-badge").style.display = e.halted ? "inline-block" : "none";
+  if (e.halted) $("halt-badge").textContent = "HALTED — " + (e.halt_reason || "");
+
+  setMoney($("kpi-bankroll"), e.bankroll_cents);
+  setMoney($("kpi-pnl"), e.daily_realized_pnl_cents, true);
+  $("kpi-pnl-sub").innerHTML = trendArrow(e.daily_realized_pnl_cents) + " realized, ET day";
+  setMoney($("kpi-expo"), e.open_cost_cents);
+  const pct = e.bankroll_cents ? (100 * e.open_cost_cents / e.bankroll_cents) : 0;
+  $("kpi-expo-sub").textContent = pct.toFixed(1) + "% of bankroll at risk";
+  $("kpi-pos").textContent = e.open_positions ?? "—";
+
+  renderBars($("expo-skill"), e.by_skill || {});
+  renderBars($("expo-game"), e.by_game || {});
+  renderTrades(s.open_trades || []);
+
+  pushPnl(e.daily_realized_pnl_cents || 0);
+  (s.events || []).forEach(seedEvent);
+}
+
+function trendArrow(v) {
+  if (!v) return "";
+  const up = v > 0;
+  return `<svg class="trend ${up ? "pos" : "neg"}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-label="${up ? "up" : "down"}">` +
+    (up ? `<path d="M7 17L17 7M17 7H9M17 7v8"/>` : `<path d="M7 7l10 10M17 17H9M17 17V9"/>`) + `</svg>`;
+}
+
+function renderBars(root, obj) {
+  const entries = Object.entries(obj).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) { root.innerHTML = '<div class="empty">No open exposure.</div>'; return; }
+  const max = entries[0][1];
+  root.innerHTML = entries.map(([k, v]) =>
+    `<div class="bar-row"><span class="name" title="${k}">${k}</span>` +
+    `<span class="bar-track"><span class="bar-fill" style="width:${(100 * v / max).toFixed(0)}%"></span></span>` +
+    `<span class="amt">${cents(v)}</span></div>`).join("");
+}
+
+function renderTrades(trades) {
+  const body = $("trades-body");
+  $("trades-empty").style.display = trades.length ? "none" : "block";
+  body.innerHTML = trades.map(t =>
+    `<tr><td title="${t.market_ticker}">${t.market_ticker}</td>` +
+    `<td>${t.skill}</td>` +
+    `<td><span class="chip ${t.side}">${(t.side || "").toUpperCase()}</span></td>` +
+    `<td class="num">${t.contracts}</td>` +
+    `<td class="num">${t.entry_price_cents}</td>` +
+    `<td>${(t.league || "").toUpperCase()}</td>` +
+    `<td>${t.game_id || ""}</td></tr>`).join("");
+}
+
+/* ---------- live feed ---------- */
+const seenEvents = new Set();
+function seedEvent(evt) { addFeed(evt, true); }
+function addFeed(evt, fromSeed) {
+  const key = evt.ts + "|" + evt.kind + "|" + (evt.game_id || "") + "|" + (evt.result || evt.signal_type || evt.n || "");
+  if (seenEvents.has(key)) return;
+  seenEvents.add(key);
+  $("feed-empty").style.display = "none";
+  const li = document.createElement("li");
+  const t = evt.ts ? new Date(evt.ts).toLocaleTimeString([], { hour12: false }) : "";
+  let detail = "";
+  if (evt.kind === "signal") detail = `${(evt.league || "").toUpperCase()} ${evt.game_id || ""} · ${evt.signal_type || ""}${evt.market_ticker ? " · " + evt.market_ticker : ""}`;
+  else if (evt.kind === "disposition") detail = `${(evt.league || "").toUpperCase()} ${evt.game_id || ""} · ${evt.signal_type || ""} → ${evt.result || ""}`;
+  else if (evt.kind === "cycle") detail = `cycle ${evt.n} · ${evt.signals ?? 0} signals · ${(evt.finals || []).length} finals · ${(evt.exits || []).length} exits`;
+  else detail = JSON.stringify(evt);
+  li.innerHTML = `<time datetime="${evt.ts || ""}">${t}</time>` +
+    `<span class="kind chip kind-${evt.kind}">${evt.kind}</span>` +
+    `<span class="detail"></span>`;
+  li.querySelector(".detail").textContent = detail;
+  const feed = $("feed");
+  feed.prepend(li);
+  while (feed.children.length > 100) feed.removeChild(feed.lastChild);
+}
+
+/* ---------- streaming area chart (canvas; Real-Time Streaming spec) ---------- */
+function pushPnl(v) {
+  if (paused) return;                      // pause/resume required by a11y spec
+  const now = Date.now() / 1000;
+  chartBuf.push({ t: now, v });
+  while (chartBuf.length && chartBuf[0].t < now - BUFFER_S) chartBuf.shift();
+  $("chart-now").textContent = cents(v);
+  $("chart-now").className = "chart-now " + (v > 0 ? "pos" : v < 0 ? "neg" : "");
+  drawChart();
+}
+
+function drawChart() {
+  const canvas = $("pnl-chart");
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight || 180;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  // gridlines: low-contrast so they don't compete with data (gridline-subtle)
+  ctx.strokeStyle = "#1A1E2F";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    ctx.beginPath(); ctx.moveTo(0, (H / 4) * i); ctx.lineTo(W, (H / 4) * i); ctx.stroke();
+  }
+  if (chartBuf.length < 2) return;
+
+  const now = Date.now() / 1000;
+  const vals = chartBuf.map(p => p.v);
+  const vMax = Math.max(1, ...vals.map(Math.abs)) * 1.15;
+  const x = (t) => W - ((now - t) / BUFFER_S) * W;
+  const y = (v) => H / 2 - (v / vMax) * (H / 2 - 8);
+
+  // zero line
+  ctx.strokeStyle = "#334155";
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(W, y(0)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const last = chartBuf[chartBuf.length - 1];
+  const lineColor = last.v >= 0 ? "#22C55E" : "#EF4444";
+
+  // area fill (fading history per chart color guidance)
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, lineColor + "44");
+  grad.addColorStop(1, lineColor + "00");
+  ctx.beginPath();
+  chartBuf.forEach((p, i) => { i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v)); });
+  ctx.lineTo(x(last.t), y(0)); ctx.lineTo(x(chartBuf[0].t), y(0)); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  // data line: contrast vs background >= 3:1 (contrast-data)
+  ctx.beginPath();
+  chartBuf.forEach((p, i) => { i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v)); });
+  ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.stroke();
+
+  // current pulse dot (#00FF00 dark-theme pulse per chart guidance)
+  ctx.beginPath();
+  ctx.arc(x(last.t), y(last.v), 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = "#00FF00";   /* --pulse-color: chart guidance, dark theme */
+  ctx.fill();
+}
+
+/* ---------- pause / resume (required control) ---------- */
+$("pause-btn").addEventListener("click", () => {
+  paused = !paused;
+  $("pause-btn").setAttribute("aria-pressed", String(paused));
+  $("pause-btn").setAttribute("aria-label", paused ? "Resume live stream" : "Pause live stream");
+  $("pause-text").textContent = paused ? "Resume" : "Pause";
+  $("pause-icon").innerHTML = paused
+    ? '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>'
+    : '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>';
+  $("chart-status").textContent = paused ? "stream paused — data still recorded server-side" : "";
+});
+
+/* ---------- WebSocket (existing /ws contract, reconnect w/ backoff) ---------- */
+function setConn(live, text) {
+  $("conn-dot").className = "conn-dot" + (live ? " live" : "");
+  $("conn-text").textContent = text;
+}
+let wsRetry = 1000;
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => { wsRetry = 1000; setConn(true, "live"); };
+  ws.onmessage = (m) => {
+    if (paused) return;
+    try { addFeed(JSON.parse(m.data)); } catch {}
+    refreshState();
+  };
+  ws.onclose = () => {
+    setConn(false, "reconnecting…");
+    setTimeout(connectWS, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 15000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+refreshState();
+connectWS();
+setInterval(refreshState, 5000);
+setInterval(() => { if (!paused && !reducedMotion) { pushPnl(lastPnlValue()); } }, 2000);
+function lastPnlValue() { return chartBuf.length ? chartBuf[chartBuf.length - 1].v : 0; }
+window.addEventListener("resize", drawChart);
+</script>
+</body>
+</html>
