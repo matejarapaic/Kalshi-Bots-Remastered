@@ -9,6 +9,7 @@ import logging
 from datetime import date, timedelta
 
 from kalshi_bots.skills.postmortem import Postmortem, SettlementMismatch
+from kalshi_bots.timefmt import fmt_et
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class Analyst:
             lines.append(f"## {league.upper()} — {len(upcoming)} games")
             for g in upcoming:
                 lines.append(f"- {g.away.espn_abbr} @ {g.home.espn_abbr} "
-                             f"{g.start_time.isoformat()}")
+                             f"{fmt_et(g.start_time)}")
         self.vault.write_note(
             f"03-market-context/daily-slate/{day.isoformat()}-preview.md",
             {"date": day.isoformat(), "leagues": leagues},

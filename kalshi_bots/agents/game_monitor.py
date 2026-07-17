@@ -12,6 +12,7 @@ import uuid
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 
+from kalshi_bots.timefmt import fmt_et
 from kalshi_bots.types import CandidateSignal, GameState, MatchResult
 
 log = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class GameMonitor:
             status = (r.market.market_ticker if r.market
                       else f"UNMATCHED ({r.note or ('ambiguous' if r.ambiguous else 'no market')})")
             lines.append(f"- {g.away.espn_abbr} @ {g.home.espn_abbr} "
-                         f"{g.start_time.isoformat()} [{g.status}] -> {status}")
+                         f"{fmt_et(g.start_time)} [{g.status}] -> {status}")
         self.vault.write_note(
             f"03-market-context/daily-slate/{day.isoformat()}-{league}.md",
             {"league": league, "date": day.isoformat(), "games": len(games),
