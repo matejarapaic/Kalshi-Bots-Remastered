@@ -231,14 +231,15 @@ td.num, th.num { text-align: right; }
   </section>
 
   <!-- Streaming area chart: current value as large text KPI + pause control -->
-  <section class="card chart-card" aria-label="Daily profit and loss stream">
-    <h2>Daily P&amp;L — live stream <span style="text-transform:none;letter-spacing:0">(last 5 min)</span></h2>
+  <section class="card chart-card" aria-label="Open position profit and loss stream">
+    <h2>Open P&amp;L vs bankroll — live <span style="text-transform:none;letter-spacing:0">(last 5 min)</span></h2>
     <div class="chart-head">
       <span class="chart-now" id="chart-now" aria-live="off">—</span>
+      <span class="sub" id="chart-pnl-pct" style="color:var(--text-muted);font-size:12px"></span>
       <span class="sub" id="chart-status" style="color:var(--text-muted);font-size:12px"></span>
     </div>
     <canvas id="pnl-chart" width="900" height="180" role="img"
-            aria-label="Streaming area chart of daily realized profit and loss over the last five minutes. Current value is shown as text above."></canvas>
+            aria-label="Streaming area chart of unrealized profit and loss on open positions, marked to the current book, over the last five minutes. Current value is shown as text above."></canvas>
   </section>
 
   <!-- Exposure breakdown -->
@@ -255,8 +256,8 @@ td.num, th.num { text-align: right; }
     <div class="table-wrap">
       <table id="trades-table">
         <thead><tr>
-          <th>Market</th><th>Skill</th><th>Side</th>
-          <th class="num">Qty</th><th class="num">Entry ¢</th><th>League</th><th>Game</th>
+          <th>Market</th><th>Side</th>
+          <th class="num">Qty</th><th class="num">Entry ¢</th><th class="num">Payout</th>
         </tr></thead>
         <tbody id="trades-body"></tbody>
       </table>
@@ -330,7 +331,9 @@ async function refreshState() {
   renderBars($("expo-game"), e.by_game || {});
   renderTrades(s.open_trades || []);
 
-  pushPnl(e.daily_realized_pnl_cents || 0);
+  const unrealized = s.unrealized_pnl_cents || 0;
+  $("chart-pnl-pct").textContent = (s.unrealized_pnl_pct ?? 0).toFixed(2) + "% of bankroll";
+  pushPnl(unrealized);
   (s.events || []).forEach(seedEvent);
 }
 
@@ -356,12 +359,10 @@ function renderTrades(trades) {
   $("trades-empty").style.display = trades.length ? "none" : "block";
   body.innerHTML = trades.map(t =>
     `<tr><td title="${t.market_ticker}">${t.market_ticker}</td>` +
-    `<td>${t.skill}</td>` +
     `<td><span class="chip ${t.side}">${(t.side || "").toUpperCase()}</span></td>` +
     `<td class="num">${t.contracts}</td>` +
     `<td class="num">${t.entry_price_cents}</td>` +
-    `<td>${(t.league || "").toUpperCase()}</td>` +
-    `<td>${t.game_id || ""}</td></tr>`).join("");
+    `<td class="num">${cents((t.contracts || 0) * 100)}</td></tr>`).join("");
 }
 
 /* ---------- live feed ---------- */

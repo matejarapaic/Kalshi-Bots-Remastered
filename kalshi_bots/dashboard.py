@@ -40,17 +40,32 @@ def create_app(orchestrator):
     @app.get("/api/state")
     def state():
         exp = orchestrator.risk.exposure()
+        trades = []
+        unrealized_cents = 0
+        for t in orchestrator.trader.open_trades.values():
+            current_price = None
+            try:
+                snap = orchestrator.trader.broker.get_orderbook(t["market"])
+                current_price = snap.yes_bid if t["side"] == "yes" else snap.no_bid
+            except Exception:
+                pass  # mark-to-market unavailable this tick; entry-only row still shown
+            if current_price is not None:
+                unrealized_cents += t["contracts"] * (current_price - t["entry_price"])
+            trades.append({
+                "sport": t["league"], "league": t["league"],
+                "game_id": t["espn_event_id"], "signal_type": None,
+                "skill": t["skill"], "market_ticker": t["market_ticker"],
+                "side": t["side"], "contracts": t["contracts"],
+                "entry_price_cents": t["entry_price"],
+                "current_price_cents": current_price,
+            })
+        bankroll = exp.bankroll_cents
         return {
             "env": "demo",
             "exposure": dataclasses.asdict(exp),
-            "open_trades": [
-                {"sport": t["league"], "league": t["league"],
-                 "game_id": t["espn_event_id"], "signal_type": None,
-                 "skill": t["skill"], "market_ticker": t["market_ticker"],
-                 "side": t["side"], "contracts": t["contracts"],
-                 "entry_price_cents": t["entry_price"]}
-                for t in orchestrator.trader.open_trades.values()
-            ],
+            "unrealized_pnl_cents": unrealized_cents,
+            "unrealized_pnl_pct": (100 * unrealized_cents / bankroll) if bankroll else 0.0,
+            "open_trades": trades,
             "events": orchestrator.events[-100:],
         }
 

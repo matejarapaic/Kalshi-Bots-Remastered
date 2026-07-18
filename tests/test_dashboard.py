@@ -47,9 +47,44 @@ def test_index_serves_html(client):
 def test_state_contract_shape(client):
     c, _ = client
     s = c.get("/api/state").json()
-    assert set(s.keys()) == {"env", "exposure", "open_trades", "events"}
+    assert set(s.keys()) == {"env", "exposure", "unrealized_pnl_cents",
+                             "unrealized_pnl_pct", "open_trades", "events"}
     evt = s["events"][-1]
     assert {"sport", "league", "game_id", "signal_type"} <= set(evt.keys())
+
+
+class FakeBroker:
+    def __init__(self, yes_bid=55):
+        self.yes_bid = yes_bid
+
+    def get_orderbook(self, market):
+        from kalshi_bots.types import OrderbookSnapshot
+        return OrderbookSnapshot(
+            market=market, yes_bid=self.yes_bid, yes_ask=self.yes_bid + 2,
+            no_bid=100 - self.yes_bid - 2, no_ask=100 - self.yes_bid,
+            yes_book=[], no_book=[], devigged_yes_prob=None,
+            spread_cents=2, fetched_at=None)
+
+
+def test_open_trades_mark_to_market_pnl():
+    from kalshi_bots.types import MarketRef
+
+    orch = FakeOrchestrator()
+    orch.trader.broker = FakeBroker(yes_bid=55)  # entered at 49c, now 55c bid
+    market = MarketRef(league="mlb", series_ticker="KXMLBGAME",
+                       event_ticker="KXMLBGAME-26JUL171905LADNYY",
+                       market_ticker="KXMLBGAME-26JUL171905LADNYY-NYY",
+                       yes_team_kalshi_abbr="NYY", title="t", close_ts=None,
+                       settlement_notes=None)
+    orch.trader.open_trades = {"kb-1": {
+        "market_ticker": market.market_ticker, "skill": "sportsbook-kalshi-divergence",
+        "side": "yes", "contracts": 10, "entry_price": 49,
+        "espn_event_id": "e1", "league": "mlb", "market": market,
+    }}
+    c = TestClient(create_app(orch))
+    s = c.get("/api/state").json()
+    assert s["unrealized_pnl_cents"] == 60  # 10 * (55 - 49)
+    assert s["open_trades"][0]["current_price_cents"] == 55
 
 
 def test_websocket_handshake_and_push(client):
