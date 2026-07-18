@@ -9,7 +9,7 @@ from kalshi_bots.skills.kalshi_client import (
     KalshiClient, KalshiProdRefused, build_snapshot, depth_within,
     dollars_to_cents, est_fee_cents,
 )
-from kalshi_bots.types import MarketRef
+from kalshi_bots.types import MarketRef, OrderRequest
 
 MARKET = MarketRef(league="mlb", series_ticker="KXMLBGAME",
                    event_ticker="KXMLBGAME-26JUL191920LADNYY",
@@ -147,3 +147,171 @@ class TestSigning:
             padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
                         salt_length=hashes.SHA256().digest_size),
             hashes.SHA256())  # raises if invalid
+
+
+# Real order object pulled live from the demo exchange during the
+# 2026-07-18 incident (order e0ca763f...): fully executed 4-contract fill.
+# The old _order_result read taker_fill_count_fp/taker_fill_count, which
+# don't exist on this object, so filled_contracts silently computed to 0 —
+# every real fill was logged as "declined:unfilled" and never reached the
+# risk ledger or vault, causing unbounded, untracked position accumulation.
+REAL_EXECUTED_ORDER = {
+    "action": "buy", "book_side": "bid", "client_order_id": "kb-2156fc481c0a",
+    "created_time": "2026-07-18T00:42:05.833916Z", "fill_count_fp": "4.00",
+    "initial_count_fp": "4.00", "last_update_time": "2026-07-18T00:42:05.833916Z",
+    "maker_fees_dollars": "0.000000", "maker_fill_cost_dollars": "0.000000",
+    "no_price_dollars": "0.5100", "order_id": "e0ca763f-1f18-4718-b4b1-9c9f922dc5ab",
+    "outcome_side": "yes", "remaining_count_fp": "0.00",
+    "self_trade_prevention_type": "taker_at_cross", "side": "yes",
+    "status": "executed", "subaccount_number": 0,
+    "taker_fees_dollars": "0.070000", "taker_fill_cost_dollars": "1.960000",
+    "ticker": "KXMLBGAME-26JUL171905LADNYY-NYY", "type": "limit",
+    "user_id": "c197aa39-3f37-4460-8a97-d6975d0c90d5", "yes_price_dollars": "0.4900",
+}
+
+
+# The actual raw response from a live POST /portfolio/events/orders call
+# (2026-07-18 diagnostic order, 1 contract, fully filled at 49c). This is
+# the shape place_order truly has to parse in real time — it has NO
+# "status" field and NO "order" wrapper, and uses fill_count (not
+# fill_count_fp). A fix verified only against the GET-order shape (above)
+# still silently reported this as an unfilled/rejected order.
+REAL_CREATE_ORDER_RESPONSE = {
+    "average_fee_paid": "0.0175", "average_fill_price": "0.4900",
+    "client_order_id": "kb-diag-9688997c", "fill_count": "1.00",
+    "order_id": "85f92316-1e7a-4e6c-919f-37d2af08ea19",
+    "remaining_count": "0.00", "ts_ms": 1784336830522,
+}
+
+
+class TestOrderResultFieldNames:
+    def test_real_executed_order_reports_actual_fill(self):
+        result = KalshiClient._order_result(REAL_EXECUTED_ORDER)
+        assert result.status == "filled"
+        assert result.filled_contracts == 4
+        assert result.avg_fill_price == 49
+        assert result.fee_cents == 7
+
+    def test_real_create_order_response_reports_actual_fill(self):
+        result = KalshiClient._order_result(REAL_CREATE_ORDER_RESPONSE)
+        assert result.status == "filled"
+        assert result.filled_contracts == 1
+        assert result.avg_fill_price == 49
+        assert result.fee_cents == 2  # 0.0175 -> ceil-rounded cents
+
+    def test_create_order_response_zero_fill_is_not_filled(self):
+        result = KalshiClient._order_result({
+            "fill_count": "0.00", "remaining_count": "0.00",
+            "order_id": "x", "client_order_id": "y",
+        })
+        assert result.status == "canceled"
+        assert result.filled_contracts == 0
+        assert result.avg_fill_price is None
+
+    def test_place_order_parses_real_flat_create_response(self, monkeypatch):
+        monkeypatch.setenv("KALSHI_ENV", "demo")
+        monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
+        c = KalshiClient()
+        c._key_id, c._private_key = "kid", object()
+        c._headers = lambda method, path: {}
+        monkeypatch.setattr(c.session, "request", lambda *a, **k:
+                            _FakeResponse(200, REAL_CREATE_ORDER_RESPONSE))
+        result = c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="yes", action="buy",
+            contracts=1, limit_price=49, client_order_id="kb-diag-9688997c"))
+        assert result.filled_contracts == 1  # was silently 0 before this fix
+
+    def test_place_order_end_to_end_reports_the_real_fill(self, monkeypatch):
+        monkeypatch.setenv("KALSHI_ENV", "demo")
+        monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
+        c = KalshiClient()
+        c._key_id, c._private_key = "kid", object()
+        c._headers = lambda method, path: {}
+        monkeypatch.setattr(c.session, "request", lambda *a, **k:
+                            _FakeResponse(200, {"order": REAL_EXECUTED_ORDER}))
+        result = c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="yes", action="buy",
+            contracts=4, limit_price=49, client_order_id="kb-2156fc481c0a"))
+        assert result.filled_contracts == 4  # was silently 0 before the fix
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class TestPlaceOrderV2:
+    """Regression coverage for the v1->v2 create-order migration: a live
+    order against /portfolio/orders (v1) started getting rejected with
+    410 deprecated_v1_order_endpoint, which had no test coverage and
+    took down the whole orchestrator loop (see 2026-07-17 incident)."""
+
+    def _client(self, monkeypatch):
+        monkeypatch.setenv("KALSHI_ENV", "demo")
+        monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
+        monkeypatch.delenv("KALSHI_KEY_PATH", raising=False)
+        c = KalshiClient()
+        c._key_id, c._private_key = "kid", object()  # bypass auth_required gate
+        c._headers = lambda method, path: {}
+        return c
+
+    def test_buy_yes_posts_bid_on_v2_path(self, monkeypatch):
+        c = self._client(monkeypatch)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["method"], captured["url"], captured["body"] = method, url, json
+            return _FakeResponse(200, {"order": {
+                "order_id": "o1", "status": "executed",
+                "fill_count_fp": "9.00", "taker_fill_cost_dollars": "4.4100",
+                "taker_fees_dollars": "0.09"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        result = c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="yes", action="buy",
+            contracts=9, limit_price=49, client_order_id="kb-1"))
+
+        assert captured["url"].endswith("/portfolio/events/orders")
+        assert captured["body"]["side"] == "bid"
+        assert captured["body"]["price"] == "0.4900"
+        assert captured["body"]["count"] == "9.00"
+        assert "yes_price" not in captured["body"] and "action" not in captured["body"]
+        assert result.filled_contracts == 9
+
+    def test_buy_no_posts_ask_at_complement_price(self, monkeypatch):
+        c = self._client(monkeypatch)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["body"] = json
+            return _FakeResponse(200, {"order": {
+                "order_id": "o2", "status": "executed",
+                "fill_count_fp": "5.00", "taker_fill_cost_dollars": "1.5000",
+                "taker_fees_dollars": "0.03"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="no", action="buy",
+            contracts=5, limit_price=70, client_order_id="kb-2"))
+
+        # buying NO at 70c is quoted to the v2 (YES-only) book as an ask at 1-0.70
+        assert captured["body"]["side"] == "ask"
+        assert captured["body"]["price"] == "0.3000"
+
+    def test_deprecated_endpoint_rejection_raises_order_rejected(self, monkeypatch):
+        from kalshi_bots.skills.kalshi_client import KalshiOrderRejected
+        c = self._client(monkeypatch)
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            return _FakeResponse(410, {"error": {"code": "deprecated_v1_order_endpoint"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        with pytest.raises(KalshiOrderRejected):
+            c.place_order(OrderRequest(
+                market_ticker=MARKET.market_ticker, side="yes", action="buy",
+                contracts=1, limit_price=50, client_order_id="kb-3"))

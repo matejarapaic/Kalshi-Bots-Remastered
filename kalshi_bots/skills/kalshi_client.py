@@ -333,14 +333,23 @@ class KalshiClient:
     def place_order(self, req: OrderRequest) -> OrderResult:
         if req.action == "buy" and req.limit_price is None:
             raise KalshiOrderRejected("market orders forbidden on entry (spec rule 11)")
+        # v2 book is YES-only: "bid" buys YES, "ask" sells YES (economically
+        # equivalent to buying NO at 1 - price) — see create-order-v2 BookSide spec.
+        if req.side == "yes":
+            book_side, price_cents = "bid", req.limit_price
+        else:
+            book_side, price_cents = "ask", 100 - req.limit_price
         body = {
-            "ticker": req.market_ticker, "side": req.side, "action": req.action,
-            "count": req.contracts, "type": "limit",
+            "ticker": req.market_ticker, "side": book_side,
+            "count": f"{req.contracts:.2f}",
+            "price": f"{price_cents / 100:.4f}",
+            "type": "limit",
+            "time_in_force": "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
             "client_order_id": req.client_order_id,
-            ("yes_price" if req.side == "yes" else "no_price"): req.limit_price,
         }
         try:
-            raw = self._req("POST", "/portfolio/orders", body=body, auth_required=True)
+            raw = self._req("POST", "/portfolio/events/orders", body=body, auth_required=True)
         except KalshiClientError as e:
             if isinstance(e, (KalshiAuthError, KalshiRateLimitError)):
                 raise
@@ -353,16 +362,38 @@ class KalshiClient:
 
     @staticmethod
     def _order_result(o: dict) -> OrderResult:
+        # v2 has two incompatible order-shaped responses, both verified live
+        # 2026-07-18: POST create-order returns a flat {fill_count,
+        # average_fill_price, average_fee_paid, remaining_count, order_id}
+        # with NO "status" field; GET /portfolio/orders/{id} returns
+        # {"order": {fill_count_fp, taker_fill_cost_dollars,
+        # maker_fill_cost_dollars, taker_fees_dollars, maker_fees_dollars,
+        # status, ...}}. Handling only the GET shape (an earlier attempt at
+        # this fix) still silently computed filled_contracts=0 for every
+        # real fill via the POST path — the one place_order actually uses.
         status_map = {"resting": "resting", "executed": "filled", "canceled": "canceled",
                       "pending": "resting"}
-        filled = int(float(o.get("taker_fill_count_fp", o.get("taker_fill_count", 0)) or 0))
-        avg = None
-        if o.get("taker_fill_cost_dollars") and filled:
-            avg = dollars_to_cents(Decimal(str(o["taker_fill_cost_dollars"])) / filled)
+        filled = int(float(o.get("fill_count_fp", o.get("fill_count", 0)) or 0))
+
+        if "average_fill_price" in o:
+            avg = dollars_to_cents(o["average_fill_price"]) if filled else None
+            fee_total = Decimal(str(o.get("average_fee_paid", "0") or "0")) * filled
+        else:
+            cost = (Decimal(str(o.get("taker_fill_cost_dollars", "0") or "0"))
+                    + Decimal(str(o.get("maker_fill_cost_dollars", "0") or "0")))
+            avg = dollars_to_cents(cost / filled) if filled else None
+            fee_total = (Decimal(str(o.get("taker_fees_dollars", "0") or "0"))
+                         + Decimal(str(o.get("maker_fees_dollars", "0") or "0")))
+
+        if "status" in o:
+            status = status_map.get(o["status"], "rejected")
+        else:
+            remaining = float(o.get("remaining_count", o.get("remaining_count_fp", 0)) or 0)
+            status = "filled" if filled else ("canceled" if remaining == 0 else "resting")
+
         return OrderResult(
             order_id=o.get("order_id", ""),
-            status=status_map.get(o.get("status", ""), "rejected"),
-            filled_contracts=filled, avg_fill_price=avg,
-            fee_cents=abs(dollars_to_cents(o.get("taker_fees_dollars", "0") or "0")),
+            status=status, filled_contracts=filled, avg_fill_price=avg,
+            fee_cents=abs(dollars_to_cents(fee_total)),
             raw=o,
         )
