@@ -214,6 +214,30 @@ class TestFullPaperCycle:
         assert actions and "comeback_stop" in actions[0]
         assert not trader.open_trades
 
+    def test_exit_order_rejection_retries_instead_of_crashing_the_loop(self, system):
+        """Regression: an exit place_order exception (e.g. Kalshi's
+        order_already_exists 409 on a retried client_order_id) must not
+        propagate — it previously killed the orchestrator's daemon polling
+        thread from inside manage_positions, same as the earlier entry-side
+        bug."""
+        espn, trader = system["espn"], system["trader"]
+        monitor = system["monitor"]
+        day = date(2026, 7, 17)
+        signals = monitor.poll_cycle("mlb", day)
+        garbage = [s for s in signals if s.signal_type == "garbage-time-candidate"]
+        trader.handle_signal(garbage[0], espn.game())
+        assert trader.open_trades
+
+        def boom(req):
+            raise RuntimeError("409: order_already_exists")
+        system["broker"].place_order = boom
+
+        game = espn.game()
+        game.win_prob_home = 0.90  # triggers comeback_stop
+        actions = trader.manage_positions({"e1": game})
+        assert actions == []  # no crash, no bogus "exited" action
+        assert trader.open_trades  # position stays open to retry next cycle
+
     def test_halted_system_declines(self, system):
         espn, monitor, trader = system["espn"], system["monitor"], system["trader"]
         system["risk"].set_halt(True, "test", caller="discord")
@@ -221,3 +245,21 @@ class TestFullPaperCycle:
         garbage = [s for s in signals if s.signal_type == "garbage-time-candidate"]
         d = trader.handle_signal(garbage[0], espn.game())
         assert d.startswith("declined:halted")
+
+    def test_order_rejection_declines_instead_of_crashing_the_loop(self, system):
+        """Regression: a broker.place_order exception (e.g. the exchange
+        rejecting a deprecated/malformed order) must degrade to a declined
+        disposition, not propagate — an uncaught exception here previously
+        killed the orchestrator's daemon polling thread entirely."""
+        espn, monitor, trader = system["espn"], system["monitor"], system["trader"]
+        day = date(2026, 7, 17)
+        signals = monitor.poll_cycle("mlb", day)
+        garbage = [s for s in signals if s.signal_type == "garbage-time-candidate"]
+
+        def boom(req):
+            raise RuntimeError("410: deprecated_v1_order_endpoint")
+        system["broker"].place_order = boom
+
+        disposition = trader.handle_signal(garbage[0], espn.game())
+        assert disposition.startswith("declined:order_rejected")
+        assert not trader.open_trades

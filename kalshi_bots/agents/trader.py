@@ -104,10 +104,14 @@ class Trader:
             self.risk.cancel_intent(market.market_ticker, best.skill_name)
             return f"declined:approval_{outcome.decision}"
 
-        order = self.broker.place_order(OrderRequest(
-            market_ticker=market.market_ticker, side=side, action="buy",
-            contracts=sizing.contracts, limit_price=price,
-            client_order_id=coid))
+        try:
+            order = self.broker.place_order(OrderRequest(
+                market_ticker=market.market_ticker, side=side, action="buy",
+                contracts=sizing.contracts, limit_price=price,
+                client_order_id=coid))
+        except Exception as e:
+            self.risk.cancel_intent(market.market_ticker, best.skill_name)
+            return f"declined:order_rejected({e})"
         if order.filled_contracts == 0:
             self.risk.cancel_intent(market.market_ticker, best.skill_name)
             return f"declined:unfilled({order.status})"
@@ -282,10 +286,17 @@ class Trader:
             if bid is None:
                 log.error("no bid to exit into for %s — will retry", coid)
                 continue
-            order = self.broker.place_order(OrderRequest(
-                market_ticker=market.market_ticker, side=t["side"],
-                action="sell", contracts=t["contracts"], limit_price=max(1, bid - 1),
-                client_order_id=f"{coid}-exit"))
+            try:
+                order = self.broker.place_order(OrderRequest(
+                    market_ticker=market.market_ticker, side=t["side"],
+                    action="sell", contracts=t["contracts"], limit_price=max(1, bid - 1),
+                    # unique per attempt: a fixed f"{coid}-exit" id collided
+                    # ("order_already_exists") on retry after an attempt that
+                    # didn't fully fill, killing the orchestrator loop
+                    client_order_id=f"{coid}-exit-{uuid.uuid4().hex[:8]}"))
+            except Exception as e:
+                log.error("exit order failed for %s: %s — will retry", coid, e)
+                continue
             if order.filled_contracts > 0:
                 fills = [f for f in self.broker.get_fills(market.market_ticker)
                          if f.order_id == order.order_id]
