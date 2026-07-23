@@ -301,9 +301,23 @@ class KalshiOrderBook:
         body = m.get("msg") or {}
         if body.get("index_id") not in (BRTI_INDEX_ID, None):
             return
-        data = body.get("data") or {}
+        # `data` is a JSON-ENCODED STRING, not an object (live-verified
+        # 2026-07-23: `"data":"{\"type\":\"value\",...,\"value\":\"65766.03\"}"`)
+        # — a second decode is required before any field lookup.
+        raw_data = body.get("data")
+        data = {}
+        if isinstance(raw_data, str):
+            import orjson
+            try:
+                data = orjson.loads(raw_data)
+            except ValueError:
+                data = {}
+        elif isinstance(raw_data, dict):
+            data = raw_data
         ts = None
-        ts_ms = body.get("ts_ms") or data.get("ts_ms")
+        # live shape carries the tick time as body-level `received_at` (ms)
+        # or the decoded data's `time` (ms); `ts_ms` was a guess, never seen.
+        ts_ms = body.get("received_at") or body.get("ts_ms") or data.get("time")
         if ts_ms:
             try:
                 ts = datetime.fromtimestamp(int(ts_ms) / 1e3, tz=timezone.utc)

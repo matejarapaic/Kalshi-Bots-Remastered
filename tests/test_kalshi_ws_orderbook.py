@@ -146,18 +146,46 @@ class TestHealth:
 
 class TestBrti:
     def test_brti_tick_parsed(self):
+        # verbatim live capture, demo WS, 2026-07-23: `data` is a
+        # JSON-ENCODED STRING (not an object) and the tick timestamp is
+        # body-level `received_at` (ms), not a `ts_ms` field anywhere.
         book = make_book(subscribed=False)
-        book._handle_message({"type": "cfbenchmarks_value", "sid": 9, "msg": {
-            "index_id": "BRTI",
-            "data": {"value": 66010.86, "ts_ms": 1784769841000},
-            "avg_60s_data": 66009.10,
-            "last_60s_windowed_average_15min": 66008.55,
-        }})
+        book._handle_message({
+            "type": "cfbenchmarks_value", "sid": 1, "seq": 1, "msg": {
+                "index_id": "BRTI", "received_at": 1784775705108,
+                "data": ('{"type":"value","time":1784775705000,'
+                        '"id":"BRTI","value":"65766.03"}'),
+                "avg_60s_data": {"value": "65766.03000000", "window_size": 0,
+                                "window_start_ts_ms": 1784775645000,
+                                "window_end_ts_exclusive": 1784775705000},
+            }})
         b = book.brti()
         assert b is not None
-        assert b.value == 66010.86
-        assert b.avg_60s == 66009.10
-        assert b.settlement_forming == 66008.55
+        assert b.value == 65766.03
+        assert b.avg_60s == 65766.03
+        assert b.settlement_forming is None  # absent outside the final minute
+        assert b.ts == datetime.fromtimestamp(1784775705108 / 1e3, tz=timezone.utc)
+
+    def test_brti_settlement_forming_present_in_final_minute(self):
+        # documented shape (asyncapi.yaml); not yet observed live since no
+        # capture window landed in a settlement final-minute
+        book = make_book(subscribed=False)
+        book._handle_message({"type": "cfbenchmarks_value", "sid": 1, "msg": {
+            "index_id": "BRTI", "received_at": 1784775705108,
+            "data": '{"value":"65766.03"}',
+            "avg_60s_data": {"value": "65766.03"},
+            "last_60s_windowed_average_15min": {"value": "65760.00"},
+        }})
+        assert book.brti().settlement_forming == 65760.00
+
+    def test_brti_malformed_data_string_does_not_crash(self):
+        book = make_book(subscribed=False)
+        book._handle_message({"type": "cfbenchmarks_value", "sid": 1, "msg": {
+            "index_id": "BRTI", "received_at": 1784775705108,
+            "data": "not json", "avg_60s_data": {"value": "1.0"},
+        }})
+        b = book.brti()
+        assert b is not None and b.value is None  # degrades, never raises
 
     def test_brti_absent_before_first_tick(self):
         assert make_book(subscribed=False).brti() is None

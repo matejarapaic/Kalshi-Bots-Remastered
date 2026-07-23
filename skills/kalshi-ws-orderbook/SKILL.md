@@ -2,7 +2,9 @@
 
 **Trigger:** any component needs a live order book for the active contract, or the BRTI settlement index stream.
 
-`api_verified: 2026-07-22` (docs.kalshi.com asyncapi.yaml "Kalshi Market Data WebSocket API v2.0.0" + live endpoint probes: both WS hosts alive and enforcing auth. **Live subscribe/message flow NOT yet verified end-to-end**: the demo API key in `.env` is dead — both REST and WS return `authentication_error NOT_FOUND`, so run `scripts/smoke_kalshi_ws.py` and re-stamp this line once the owner issues a fresh demo key. Message shapes below are from the official asyncapi spec, and the BRTI value-field parse is deliberately defensive until a live frame confirms it.)
+`api_verified: 2026-07-23` (fresh demo key issued; full live round-trip via `scripts/smoke_kalshi_ws.py` against a real KXBTC15M window: auth handshake, orderbook_delta subscribe/snapshot/delta, and cfbenchmarks_value all confirmed working end-to-end.)
+
+**Live correction to the BRTI message shape** (`cfbenchmarks_value`, found running the smoke script against real traffic): `msg.data` is a **JSON-encoded string**, not an object — e.g. `"data":"{\"type\":\"value\",\"time\":1784775705000,\"id\":\"BRTI\",\"value\":\"65766.03\"}"` — and requires a second decode before any field lookup; a naive `.get()` on it crashes with `'str' object has no attribute 'get'`. The tick timestamp is body-level `received_at` (epoch ms), not a `ts_ms` field anywhere in the payload (that name was a pre-verification guess). Both fixed in `_on_brti`; `avg_60s_data` was already a proper nested object as originally assumed and needed no change. `last_60s_windowed_average_15min` still UNVERIFIED live (no capture has landed in a settlement final-minute yet) — the code's handling of it is written from the asyncapi spec, untested against real traffic.
 
 ## What this is for
 
