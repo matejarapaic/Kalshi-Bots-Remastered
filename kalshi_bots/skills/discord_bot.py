@@ -5,12 +5,14 @@ abstracted: DiscordTransport (real, needs discord.py + token) or any object
 implementing the same interface (console/test transports) — the approval,
 timeout, queue, and idempotency logic here is transport-independent.
 
-Execution mode (owner-decided 2026-07-17): autonomous on demo only. This
+Execution mode: autonomous, on demo and prod alike (owner re-decided
+2026-07-22 — the prior demo-only restriction required re-answering this
+question in code, not flipping a flag; this edit is that re-answer). This
 class's own default is still the conservative `manual_approve` (see MODE
-below) — the orchestrator is what explicitly requests `autonomous` and only
-succeeds because KALSHI_ENV=demo; the same class refuses autonomous+prod
-outright (see __init__). Expiry CANCELS, never auto-approves. Exits are never
-approval-gated (there is no exit-approval path at all).
+below) for anything that constructs it without an explicit mode, but the
+orchestrator always requests `autonomous`. Expiry CANCELS, never
+auto-approves. Exits are never approval-gated (there is no exit-approval path
+at all).
 """
 from __future__ import annotations
 
@@ -103,12 +105,8 @@ class DiscordBot:
         self.mode = mode or os.environ.get("KALSHI_EXEC_MODE", "manual_approve")
         if self.mode not in ("manual_approve", "autonomous"):
             raise DiscordError(f"bad MODE {self.mode!r}")
-        # Owner decision 2026-07-17: autonomous is authorized for DEMO ONLY.
-        # Prod autonomy requires the owner to re-answer the execution-mode
-        # question (Category B) — there is deliberately no env var to skip this.
-        if self.mode == "autonomous" and os.environ.get("KALSHI_ENV", "demo") == "prod":
-            raise DiscordError("autonomous mode is authorized on demo only; "
-                               "prod requires re-answering the execution-mode question")
+        # Owner decision 2026-07-22: autonomous authorized for prod, no human
+        # approval on entries. Supersedes the 2026-07-17 demo-only restriction.
         self._pending: dict[str, dict] = {}   # client_order_id -> state
         self._plock = threading.Lock()
         self._queue: deque = deque()

@@ -27,8 +27,9 @@ ET = ZoneInfo("America/New_York")
 # CONFIRMED 2026-07-17 (carried over from the prior build; the half-Kelly
 # discipline is category-agnostic)
 BASE_KELLY_FRACTION = 0.5
-# PROPOSED 2026-07-22 (crypto pivot defaults; skills are draft-status until
-# postmortems accumulate 30+ settled samples — see 02-trading-skills notes)
+# CONFIRMED 2026-07-22 (owner override: authorized live without the intended
+# 30+ settled-sample validation — demo liquidity was insufficient to gather
+# it; values carried over unchanged from the crypto pivot defaults)
 SKILL_RISK_MULTIPLIER = {          # (live, non_live); crypto trades 24/7 so
     "btc-15min-fair-value": (1.0, 1.0),        # only the live column applies
     "btc-15min-orderflow-imbalance": (1.0, 1.0),
@@ -44,9 +45,9 @@ SKILL_MIN_DEPTH = {                # contracts within 2c of entry, per skill not
     "btc-15min-orderflow-imbalance": 100,
     "btc-15min-vol-spike": 100,
 }
-MAX_CONTRACTS_PER_WINDOW = 20      # PROPOSED: hard contract cap per 15-min
-                                   # window while skills are draft-calibrating
-# btc-15min-fair-value entry/exit parameters (PROPOSED 2026-07-22; mirrored in
+MAX_CONTRACTS_PER_WINDOW = 20      # CONFIRMED 2026-07-22: hard contract cap
+                                   # per 15-min window
+# btc-15min-fair-value entry/exit parameters (CONFIRMED 2026-07-22; mirrored in
 # the vault skill note — the note is the human-readable contract, this is the
 # single machine home for the numbers)
 MIN_EDGE_CENTS = 4                 # model-vs-ask divergence required to enter
@@ -58,8 +59,8 @@ DEPTH_COLLAPSE_FRACTION = 0.5      # exit when either side falls below
                                    # MIN_DEPTH_WITHIN_5C * this
 ENTRY_PHASES = ("midpoint",)       # no entries in opening (strike/book still
                                    # settling) or near_close (gamma dominates)
-# CONFIRMED 2026-07-17 (Phase 2 checkpoint, "tighter variant") — carried to
-# crypto as PROPOSED until the owner re-confirms them for this market family
+# CONFIRMED 2026-07-17 (Phase 2 checkpoint, "tighter variant"); re-confirmed
+# 2026-07-22 for the crypto market family, unchanged
 TOTAL_EXPOSURE_CAP_PCT = 15
 PER_EVENT_EXPOSURE_CAP_PCT = 5
 CORRELATION_SCALE_SAME_EVENT = 0.5

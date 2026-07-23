@@ -41,12 +41,13 @@ def _window_state(orchestrator) -> dict | None:
     spot = feed.current_composite() if feed is not None else None
     sigma = feed.realized_vol() if feed is not None else None
     snap = book.snapshot(w.market_ticker) if book is not None else None
-    model_prob = edge = None
+    model_prob = edge = edge_no = None
     if spot is not None and sigma and w.strike:
         try:
-            from kalshi_bots.skills.fair_value_model import evaluate
+            from kalshi_bots.skills.fair_value_model import evaluate, side_edges
             est = evaluate(w, spot, snap, sigma, now=now)
             model_prob, edge = est.model_prob_up, est.edge_cents
+            edge_no = side_edges(est, snap)["no"]
         except Exception:
             pass
     return {
@@ -60,7 +61,10 @@ def _window_state(orchestrator) -> dict | None:
         "model_prob_up": model_prob,
         "yes_bid": snap.yes_bid if snap is not None else None,
         "yes_ask": snap.yes_ask if snap is not None else None,
+        "no_bid": snap.no_bid if snap is not None else None,
+        "no_ask": snap.no_ask if snap is not None else None,
         "edge_cents": edge,
+        "edge_no_cents": edge_no,
     }
 
 

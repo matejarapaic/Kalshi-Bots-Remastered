@@ -115,6 +115,9 @@ def test_window_state_renders_model_vs_market():
     assert win["strike"] == 65900.0 and win["spot"] == 66000.0
     assert win["model_prob_up"] > 0.5          # spot above strike
     assert win["edge_cents"] == pytest.approx(win["model_prob_up"] * 100 - 55)
+    assert win["no_bid"] == 45 and win["no_ask"] == 47
+    model_prob_down = 1.0 - win["model_prob_up"]
+    assert win["edge_no_cents"] == pytest.approx(model_prob_down * 100 - 47)
     assert s["feed"]["kalshi_ws"]["healthy"] is True
 
 

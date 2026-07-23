@@ -85,6 +85,42 @@ def window_realized_vol(log_lines: list[dict]) -> float | None:
     return math.sqrt(var) * math.sqrt(SECONDS_PER_YEAR)
 
 
+def _cell(v) -> str:
+    return "—" if v is None else str(v)
+
+
+def _hit_mark(model_right: bool | None) -> str:
+    return "—" if model_right is None else ("✓" if model_right else "✗")
+
+
+def _orders_table(audits: list[dict], declined: list[dict]) -> str:
+    """One row per order this window produced — a real fill or a declined
+    candidate — so a window's activity is scannable without reading prose.
+    Real trades and held-to-settlement counterfactuals share one table; the
+    Type column is the only thing distinguishing real P&L from hypothetical."""
+    header = ("| Type | Order | Skill | Side | Entry¢ | Contracts | Result "
+              "| P&L¢ | Slippage¢ | Model | Flags |")
+    sep = "|---|---|---|---|---|---|---|---|---|---|---|"
+    rows = [header, sep]
+    for a in audits:
+        name = a["trade"].rsplit("/", 1)[-1].removesuffix(".md")
+        flag = "⚠ ENTRY VIOLATION" if a["entry_conditions_failed"] else ""
+        rows.append(
+            f"| trade | [[{name}]] | {_cell(a['skill'])} | {_cell(a['side'])} "
+            f"| {_cell(a['entry_price_cents'])} | {_cell(a['contracts'])} "
+            f"| {_cell(a['exit_reason'])} | {_cell(a['pnl_cents'])} "
+            f"| {_cell(a['slippage_cents'])} | {_hit_mark(a['model_right'])} "
+            f"| {flag} |")
+    for d in declined:
+        sig = d["signal"]
+        rows.append(
+            f"| declined | {_cell(sig.get('id'))} | — | {_cell(sig.get('side'))} "
+            f"| {_cell(sig.get('entry_price_cents'))} | {CF_CONTRACTS} (cf) "
+            f"| held to settlement | {_cell(d['counterfactual_pnl_cents'])} "
+            f"| — | {_hit_mark(d['model_right'])} | |")
+    return "\n".join(rows)
+
+
 class Postmortem:
     def __init__(self, vault, kalshi_client, discord_bot=None, env: str = "demo"):
         self.vault = vault
@@ -190,6 +226,11 @@ class Postmortem:
                 self.vault.update_frontmatter(t.path, {
                     "status": "closed", "exit_reason": "held_to_settlement",
                     "realized_pnl_cents": pnl}, caller="analyst")
+                # keep the in-memory copy in sync — audits.append below reads
+                # fm directly, and update_frontmatter only wrote to disk
+                fm["status"] = "closed"
+                fm["exit_reason"] = "held_to_settlement"
+                fm["realized_pnl_cents"] = pnl
             # model-was-right: did the entered side match the settled direction?
             model_right = None
             if market_result in ("yes", "no"):
@@ -204,6 +245,9 @@ class Postmortem:
             realized += pnl or 0
             audits.append({
                 "trade": t.path, "skill": fm.get("skill"),
+                "side": fm.get("side"), "contracts": fm.get("contracts"),
+                "entry_price_cents": fm.get("entry_price_cents"),
+                "exit_reason": fm.get("exit_reason"),
                 "entry_conditions_failed": failed,
                 "exit_deviation": bool(fm.get("exit_deviation")),
                 "slippage_cents": slippage, "pnl_cents": pnl,
@@ -246,11 +290,12 @@ class Postmortem:
                 price = sig.get("entry_price_cents")
                 side = sig.get("side", "yes")
                 cf = None
+                model_right = market_result == side if market_result in ("yes", "no") else None
                 if price is not None and market_result in ("yes", "no"):
                     cost = CF_CONTRACTS * price + est_fee_cents(CF_CONTRACTS, price)
                     cf = (CF_CONTRACTS * 100 - cost) if market_result == side else -cost
                     cf_pnl += cf
-                declined.append({"signal": sig,
+                declined.append({"signal": sig, "model_right": model_right,
                                  "counterfactual_pnl_cents": cf})
 
         # --- append to the daily aggregate note ---
@@ -274,20 +319,10 @@ class Postmortem:
                 f"trades={len(trades)} pnl={realized}c declined={len(declined)} "
                 f"cf={cf_pnl}c")
         section.append(meta)
-        for a in audits:
-            flag = " ⚠ ENTRY VIOLATION" if a["entry_conditions_failed"] else ""
-            hit = ("" if a["model_right"] is None
-                   else (" model✓" if a["model_right"] else " model✗"))
-            section.append(f"- {a['trade']} [{a['skill']}] pnl={a['pnl_cents']}c "
-                           f"slippage={a['slippage_cents']}c{hit}{flag}")
-        for d in declined:
-            section.append(f"- declined {d['signal'].get('id')} "
-                           f"side={d['signal'].get('side')} "
-                           f"cf={d['counterfactual_pnl_cents']}c "
-                           f"(held to settlement, {CF_CONTRACTS} contracts, "
-                           f"no market impact)")
-        if not audits and not declined:
-            section.append("- watched, nothing traded — that is data")
+        if audits or declined:
+            section.append(_orders_table(audits, declined))
+        else:
+            section.append("_watched, nothing traded — that is data_")
 
         if daily_body is None:
             daily_body = f"# Postmortems {family}\n"

@@ -1,6 +1,6 @@
 import pytest
 
-from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot, DiscordError
+from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot
 from kalshi_bots.skills.risk_management import RiskManager
 from kalshi_bots.skills.vault import Vault
 
@@ -19,13 +19,14 @@ def make_deps(tmp_path):
     return RiskManager(vault, FakeKalshi()), vault
 
 
-def test_autonomous_refused_on_prod(tmp_path, monkeypatch):
-    """Owner decision 2026-07-17: autonomous is demo-only; there is no
-    override env var — prod autonomy requires re-answering the question."""
+def test_autonomous_allowed_on_prod(tmp_path, monkeypatch):
+    """Owner decision 2026-07-22: superseded the 2026-07-17 demo-only
+    restriction by re-answering the execution-mode question in code —
+    autonomous (no per-trade approval) is now authorized on prod too."""
     monkeypatch.setenv("KALSHI_ENV", "prod")
     risk, vault = make_deps(tmp_path)
-    with pytest.raises(DiscordError, match="demo only"):
-        DiscordBot(risk, vault, transport=ConsoleTransport(), mode="autonomous")
+    bot = DiscordBot(risk, vault, transport=ConsoleTransport(), mode="autonomous")
+    assert bot.mode == "autonomous"
 
 
 def test_autonomous_allowed_on_demo(tmp_path, monkeypatch):

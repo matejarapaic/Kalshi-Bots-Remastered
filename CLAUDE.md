@@ -13,25 +13,31 @@ fair-value model → signal → size → trade → exit → postmortem. Later cr
 families (`KXETH15M`, …) are in-architecture but out of scope for the first
 pivot — nothing may hard-code BTC.
 
-> **Pivot status:** sprints 0-5 are complete — the pivot's core is done. A
-> fresh demo API key (2026-07-23) unblocked real demo-exchange execution and
-> the Kalshi WS; both are now live-verified via `scripts/smoke_kalshi_ws.py`
-> (that run also caught and fixed a real bug — `cfbenchmarks_value.data` is a
-> JSON-encoded string, not an object). With working credentials, the
-> orchestrator auto-detects real demo-exchange execution instead of
-> `PaperBroker` — orders place against Kalshi's actual demo matching engine,
-> and `autonomous` mode (demo-only, by design) auto-approves entries with no
-> human click. Remaining before live consideration: a 24-hour real-demo-run
-> review and owner confirmation of the PROPOSED risk numbers. Sprint 6
-> (Polymarket cross-reference) is optional and explicitly gated on that run.
+> **Pivot status:** sprints 0-5 are complete. A fresh demo API key
+> (2026-07-23) unblocked real demo-exchange execution and the Kalshi WS,
+> live-verified via `scripts/smoke_kalshi_ws.py` (that run also caught and
+> fixed a real bug — `cfbenchmarks_value.data` is a JSON-encoded string, not
+> an object). **2026-07-22: owner moved to live prod trading without the
+> intended 24-hour real-demo-run review or the 30+ settled-sample skill
+> validation** — demo-exchange liquidity for `KXBTC15M` was too thin to
+> accumulate fills, so there was no path to gather that data on demo. The
+> owner explicitly authorized live trading on `btc-15min-fair-value` anyway
+> (status hand-set to `confirmed` in the vault note with zero real samples)
+> and authorized `autonomous` mode on prod (no per-trade approval click).
+> Risk numbers carried over unchanged from their crypto-pivot defaults,
+> provenance comments updated to `CONFIRMED 2026-07-22` in
+> `risk_management.py` to record that sign-off honestly. The other two
+> skills (`btc-15min-orderflow-imbalance`, `btc-15min-vol-spike`) remain
+> `draft` and do not trade. Sprint 6 (Polymarket cross-reference) is
+> unaffected by this and still optional.
 
-**The system is demo-only by design, enforced at multiple layers, not just by convention:**
-- `Orchestrator.__init__` refuses to start unless `KALSHI_ENV=demo`.
+**Prod/live gates, current state (owner re-decided 2026-07-22 — see pivot status above):**
 - `KalshiClient` refuses `KALSHI_ENV=prod` unless `KALSHI_ALLOW_PROD=yes-i-mean-it` is *also* set (defense in depth — never add a shortcut around this).
-- `DiscordBot` refuses `mode="autonomous"` whenever `KALSHI_ENV=prod`, with no override env var. Moving to prod requires re-answering the execution-mode question in code, not flipping a flag.
-- (Sprint 5 adds the crypto live-trading guard: `KALSHI_ENV=prod` + `EXEC_MODE=live` requires an explicit `--i-know-what-im-doing-crypto` flag AND an interactive confirmation AND a `confirmed`-status trading skill.)
+- The crypto live-trading guard (`orchestrator.live_trading_guard`, sprint 5) still applies in full: `KALSHI_ENV=prod` + `EXEC_MODE=live` requires the explicit `--i-know-what-im-doing-crypto` CLI flag AND an interactive typed confirmation AND at least one `confirmed`-status trading skill in the vault. This is the gate the owner satisfied by hand-confirming `btc-15min-fair-value` rather than through the statistical path the guard's own error message describes — future changes to *this* mechanism still need explicit direct instruction.
+- `DiscordBot` no longer refuses `autonomous` on prod (removed 2026-07-22, this was the "re-answer the execution-mode question in code" the prior text called for) — the orchestrator always constructs it with `mode="autonomous"`. There is no per-trade approval step on demo or prod. Exits were never approval-gated either way.
+- `Trader`/`Analyst` are constructed with `env=self.mode` (the guard's actual "demo"/"live" result), not a hardcoded `"demo"` — this was a latent bug found while wiring up live trading: hardcoding it would have let the `draft`-status stub skills trade real money too (via the demo-only `allowed_statuses` relaxation) and would have mislabeled real fills as `demo_*` postmortem data.
 
-Do not weaken any of these gates without an explicit, direct instruction to do so.
+Do not weaken any of these gates further without an explicit, direct instruction to do so.
 
 ## Commands
 

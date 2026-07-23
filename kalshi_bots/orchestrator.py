@@ -147,9 +147,10 @@ class Orchestrator:
                            "slash commands/buttons", e)
         transport = gateway or (DiscordTransport(discord_token, discord_channel)
                                 if discord_token and discord_channel else ConsoleTransport())
+        # Owner decision 2026-07-22: autonomous on prod too, no approve/deny
+        # step on entries (supersedes the prior demo-only restriction).
         self.discord = DiscordBot(self.risk, self.vault, transport=transport,
-                                  mode="autonomous" if self.mode == "demo"
-                                  else "manual_approve")
+                                  mode="autonomous")
         if gateway is not None:
             gateway.bind(self.discord)  # bind before start: no window with bot_ref unset
             try:
@@ -178,7 +179,7 @@ class Orchestrator:
         self.monitor = WindowMonitor(self.vault, self.resolver,
                                      book=self.book, feed=self.feed)
         self.trader = Trader(self.vault, self.broker, self.risk,
-                             self.discord, env="demo",
+                             self.discord, env=self.mode,
                              feed=self.feed, book=self.book)
         try:
             counts = self.trader.reload_open_trades(self.risk.last_reconcile_settled)
@@ -189,7 +190,7 @@ class Orchestrator:
         except Exception as e:
             log.warning("open-trade reload skipped: %s", e)
         self.analyst = Analyst(self.vault, self.broker, discord=self.discord,
-                               env="demo",
+                               env=self.mode,
                                paper_broker=self.broker if paper else None)
         self.events: list[dict] = []   # dashboard feed (bounded below)
 

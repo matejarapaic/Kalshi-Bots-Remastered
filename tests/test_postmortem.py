@@ -164,7 +164,49 @@ class TestCryptoCounterfactuals:
         report, _ = run_pm(vault, result="no", expiration=65000.0)
         assert report.model_direction_hits == 0
         note = vault.read_note(report.note_path)
-        assert "model✗" in note.body
+        # the trade row's Model column shows the miss
+        assert "| ✗ |" in note.body
+
+
+class TestOrdersTable:
+    def test_trade_row_has_all_columns(self, vault):
+        write_window_note(vault)
+        # no explicit pnl: let run() derive it (10*100 - (10*55+5) = 445) and
+        # set exit_reason=held_to_settlement itself, same as the live code path
+        write_trade(vault, conditions={"edge_ge_min": True})
+        report, _ = run_pm(vault, result="yes")
+        note = vault.read_note(report.note_path)
+        assert "| Type | Order | Skill | Side | Entry¢ | Contracts | Result " \
+               "| P&L¢ | Slippage¢ | Model | Flags |" in note.body
+        assert "| trade | [[2026-07-23-t1]] | btc-15min-fair-value | yes " \
+               "| 55 | 10 | held_to_settlement | 445 | 0 | ✓ |  |" in note.body
+
+    def test_entry_violation_flagged_in_row(self, vault):
+        write_window_note(vault)
+        write_trade(vault, conditions={"edge_ge_min": False}, pnl=100)
+        report, _ = run_pm(vault)
+        note = vault.read_note(report.note_path)
+        assert "⚠ ENTRY VIOLATION" in note.body
+
+    def test_declined_row_shape(self, vault):
+        sig = ('- SIGNAL {"id": "sig-9", "type": "fair-value-candidate", '
+               '"market_ticker": "%s", "side": "yes", "entry_price_cents": 55}'
+               % TICKER)
+        write_window_note(vault, body_extra=sig + "\n")
+        report, _ = run_pm(vault, result="yes")
+        note = vault.read_note(report.note_path)
+        # 100*100 - (100*55 + fee ceil(7*100*55*45/10000)=174) = 4326
+        assert "| declined | sig-9 | — | yes | 55 | 100 (cf) " \
+               "| held to settlement | 4326 | — | ✓ | |" in note.body
+
+    def test_declined_row_marks_model_miss(self, vault):
+        sig = ('- SIGNAL {"id": "sig-9", "type": "fair-value-candidate", '
+               '"market_ticker": "%s", "side": "yes", "entry_price_cents": 55}'
+               % TICKER)
+        write_window_note(vault, body_extra=sig + "\n")
+        report, _ = run_pm(vault, result="no", expiration=65000.0)
+        note = vault.read_note(report.note_path)
+        assert "| declined | sig-9 |" in note.body and "| ✗ | |" in note.body
 
 
 class TestDeclined:

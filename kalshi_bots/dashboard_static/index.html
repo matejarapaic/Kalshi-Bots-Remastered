@@ -246,7 +246,9 @@ td.num, th.num { text-align: right; }
         <div class="bar-row"><span class="name">Model P(up)</span><span class="amt" id="win-model" style="width:auto">—</span></div>
         <div class="bar-row"><span class="name">σ (annualized)</span><span class="amt" id="win-sigma" style="width:auto">—</span></div>
         <div class="bar-row"><span class="name">Market yes bid/ask</span><span class="amt" id="win-book" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Edge (model − ask)</span><span class="amt" id="win-edge" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Edge yes (model − ask)</span><span class="amt" id="win-edge" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Market no bid/ask</span><span class="amt" id="win-book-no" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Edge no (model − ask)</span><span class="amt" id="win-edge-no" style="width:auto">—</span></div>
       </div>
     </div>
   </section>
@@ -417,6 +419,10 @@ function renderWindow(w) {
   const edge = w.edge_cents;
   $("win-edge").textContent = edge != null ? edge.toFixed(1) + "¢" : "—";
   $("win-edge").className = "amt " + (edge > 0 ? "pos" : edge < 0 ? "neg" : "");
+  $("win-book-no").textContent = (w.no_bid ?? "—") + " / " + (w.no_ask ?? "—");
+  const edgeNo = w.edge_no_cents;
+  $("win-edge-no").textContent = edgeNo != null ? edgeNo.toFixed(1) + "¢" : "—";
+  $("win-edge-no").className = "amt " + (edgeNo > 0 ? "pos" : edgeNo < 0 ? "neg" : "");
 }
 
 function renderFeedHealth(f) {
