@@ -147,13 +147,18 @@ class WindowMonitor:
 
     # --- helpers ---
 
-    def _market_context(self) -> dict:
+    def _market_context(self, market_ticker: str | None = None) -> dict:
         ctx: dict = {}
         if self.feed is not None:
             spot = self.feed.current_composite()
             ctx["spot"] = spot.mid if spot else None
             ctx["spot_healthy"] = spot.constituents_healthy if spot else 0
+            ctx["spot_total"] = spot.constituent_count if spot else 0
             ctx["sigma"] = self.feed.realized_vol()
+        if self.book is not None and market_ticker is not None:
+            snap = self.book.snapshot(market_ticker)
+            ctx["yes_bid"] = snap.yes_bid if snap else None
+            ctx["yes_ask"] = snap.yes_ask if snap else None
         return ctx
 
     def _signal(self, sig_type: str, w: WindowRef, phase: Phase) -> CryptoSignal:
@@ -176,7 +181,7 @@ class WindowMonitor:
         if not force and mono - self._last_note_write < NOTE_UPDATE_S:
             return
         self._last_note_write = mono
-        ctx = self._market_context()
+        ctx = self._market_context(w.market_ticker)
         fm = {
             "series_ticker": w.series_ticker, "event_id": w.event_ticker,
             "market_ticker": w.market_ticker,
@@ -193,6 +198,15 @@ class WindowMonitor:
             fm = merged
         except Exception:
             body = f"# Window {w.market_ticker}\n\n## Signals\n"
+        # per-window sample log (~30 lines/window at the 30s cadence): the
+        # postmortem's raw material for vol-was-right and constituent-drift
+        if phase != "settled":
+            entry = {"ts": now.isoformat(), "phase": phase,
+                     "spot": ctx.get("spot"), "sigma": ctx.get("sigma"),
+                     "healthy": ctx.get("spot_healthy"),
+                     "total": ctx.get("spot_total"),
+                     "yes_bid": ctx.get("yes_bid"), "yes_ask": ctx.get("yes_ask")}
+            body = body.rstrip("\n") + f"\n- LOG {json.dumps(entry)}\n"
         try:
             self.vault.write_note(self._note_path(w), fm, body,
                                   caller="window-monitor")

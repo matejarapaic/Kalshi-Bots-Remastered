@@ -13,11 +13,12 @@ fair-value model → signal → size → trade → exit → postmortem. Later cr
 families (`KXETH15M`, …) are in-architecture but out of scope for the first
 pivot — nothing may hard-code BTC.
 
-> **Pivot status:** sprints 0-3 are done — sports code removed; streaming
-> price feed, Kalshi WS order book, window monitor, fair-value model, and the
-> full trader entry/exit path are live; first vault trading skill
-> (btc-15min-fair-value, draft) written. Sprint 4 (postmortem/analyst at
-> 15-min cadence) is next. Each sprint commits as `sprint-N: …`.
+> **Pivot status:** sprints 0-4 are done — sports code removed; streaming
+> feeds, window monitor, fair-value model, full trader entry/exit path, and
+> the 15-min-cadence postmortem loop (settlement polling, daily aggregate
+> notes, batched rollups/stats, crypto counterfactuals) are live. Sprint 5
+> (dashboard, agent prompts, live-guard rails) is next. Each sprint commits
+> as `sprint-N: …`.
 
 **The system is demo-only by design, enforced at multiple layers, not just by convention:**
 - `Orchestrator.__init__` refuses to start unless `KALSHI_ENV=demo`.
@@ -70,7 +71,7 @@ Surviving skills (behavior unchanged by the pivot unless noted):
 - `skill_matcher.py` — deterministic (no LLM) scoring of a candidate signal against trading-skill notes queried from the vault. A skill's `status` must be `confirmed` to ever match — `draft`/`retired` skills are structurally invisible here, which is the actual enforcement mechanism for "don't trade unconfirmed rules."
 - `risk_management.py` — **every numeric trading parameter in the system lives in this file's module-level constants** with an explicit CONFIRMED/PROPOSED provenance comment. No other module may inline a risk number. Kelly math, ordered cap pipeline (each binding cap appends to `capped_by`), and the exposure ledger (persisted to the vault, reloaded on startup).
 - `discord_bot.py` — trade cards + slash commands behind a swappable transport: `GatewayTransport` (`kalshi_bots/discord_gateway.py`, real discord.py websocket) → `DiscordTransport` (REST-only) → `ConsoleTransport` (local log). `discord_gateway.py` lazy-imports discord.py. Execution mode (`manual_approve` vs `autonomous`) is owner-decided, currently `autonomous` on demo only. Exits are never approval-gated. `APPROVER_ROLE_ID` gates buttons/`/halt`/`/resume` but fails *open* if unset (deliberate).
-- `postmortem.py` — window-close audit of every trade's entry-condition snapshot, counterfactuals for declined signals; **sole writer** of skill-note `win_rate`/`sample_size` (env-labeled `demo_*` vs prod fields). Sprint 4 adapts it to 96-windows/day cadence (batched Discord rollups, daily aggregate notes).
+- `postmortem.py` — per-settled-window audit (~96/day): entry-condition snapshots, declined counterfactuals, crypto counterfactual dimensions (model-was-right, vol-was-right, constituent-drift), deterministic narrative block; appends to DAILY aggregate notes (one file per family per UTC day); **sole writer** of skill-note `win_rate`/`sample_size` (env-labeled `demo_*` vs prod), flushed in batches by the analyst — never per window.
 
 New crypto skills (built in sprint order):
 

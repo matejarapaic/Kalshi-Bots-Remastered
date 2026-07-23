@@ -189,6 +189,15 @@ class Orchestrator:
             summary["exits"].extend(self.trader.manage_positions(now))
         except Exception as e:
             log.error("exit sweep failed: %s", e)
+        try:
+            for report in self.analyst.poll_pending(now):
+                if report is not None:
+                    self._emit("postmortem", event_id=report.event_id,
+                               settlement=report.settlement_status,
+                               trades=report.trades_audited,
+                               pnl_cents=report.realized_pnl_cents)
+        except Exception as e:
+            log.error("settlement poll failed: %s", e)
         self.discord.flush()
         return summary
 

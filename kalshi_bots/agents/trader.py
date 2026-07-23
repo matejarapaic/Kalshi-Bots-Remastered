@@ -226,7 +226,8 @@ class Trader:
             f"(fee {order.fee_cents}c, model_prob={model_prob:.2f}, "
             f"edge≈{edge_cents:.1f}c)", level="info")
         self._write_trade_note(coid, best.skill_name, market, side, order,
-                               price, model_prob, conditions, signal, window)
+                               price, model_prob, conditions, signal, window,
+                               sigma=sigma, spot=spot.mid)
         self.open_trades[coid] = {
             "market_ticker": market.market_ticker, "skill": best.skill_name,
             "side": side, "contracts": order.filled_contracts,
@@ -352,7 +353,8 @@ class Trader:
         return f"04-trade-history/trades/{day}-{coid}.md"
 
     def _write_trade_note(self, coid, skill, market, side, order, signal_price,
-                          model_prob, conditions, signal, window: WindowRef):
+                          model_prob, conditions, signal, window: WindowRef,
+                          sigma: float | None = None, spot: float | None = None):
         path = self._note_path(coid)
         fm = {
             "client_order_id": coid,
@@ -365,6 +367,7 @@ class Trader:
             "signal_price_cents": signal_price,
             "fee_cents": order.fee_cents,
             "model_prob": model_prob,
+            "sigma": sigma, "spot": spot,
             "strike": window.strike,
             "entry_conditions": {k: bool(v) for k, v in conditions.items()},
             "signal_id": signal.payload.get("id"),

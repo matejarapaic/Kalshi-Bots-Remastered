@@ -297,7 +297,7 @@ class ApprovalOutcome:
     card_message_id: str | None
 
 
-# --- postmortem types (shape adapted fully in sprint-4) ---
+# --- postmortem types ---
 
 @dataclass
 class PostmortemReport:
@@ -312,3 +312,9 @@ class PostmortemReport:
     settlement_status: Literal["settled", "pending", "voided", "mismatch"]
     threshold_flags: list[str]
     note_path: str
+    # crypto counterfactual dimensions (sprint-4). Per-window these are
+    # coin-flippy; they exist to be aggregated by the analyst.
+    model_direction_hits: int = 0    # trades whose model side matched settlement
+    vol_ratio: float | None = None   # window realized vol / mean sigma_used
+    constituent_drift: bool = False  # a feed constituent degraded in-window
+                                     # -> exclude window from aggregate learning
