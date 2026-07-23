@@ -6,7 +6,8 @@ Full crypto state shape (active window, feed health, model-vs-market) lands
 in sprint-5.
 
 Endpoints:
-  GET /api/state  -> exposure summary, open trades, recent events
+  GET /api/state  -> active window, feed health, exposure, open trades, events
+  GET /health     -> liveness/degradation summary for always-on monitoring
   WS  /ws         -> pushes each new orchestrator event as JSON
 
 Requires the optional [serve] extra (fastapi, uvicorn). Import is lazy so the
@@ -21,9 +22,64 @@ handshake. Found live 2026-07-17.
 import asyncio
 import dataclasses
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard_static"
+
+
+def _window_state(orchestrator) -> dict | None:
+    """Model-vs-market snapshot of the active window. Defensive getattr
+    throughout: the dashboard must render whatever subset exists."""
+    monitor = getattr(orchestrator, "monitor", None)
+    w = getattr(monitor, "current_window", None)
+    if w is None:
+        return None
+    now = datetime.now(timezone.utc)
+    feed = getattr(orchestrator, "feed", None)
+    book = getattr(orchestrator, "book", None)
+    spot = feed.current_composite() if feed is not None else None
+    sigma = feed.realized_vol() if feed is not None else None
+    snap = book.snapshot(w.market_ticker) if book is not None else None
+    model_prob = edge = None
+    if spot is not None and sigma and w.strike:
+        try:
+            from kalshi_bots.skills.fair_value_model import evaluate
+            est = evaluate(w, spot, snap, sigma, now=now)
+            model_prob, edge = est.model_prob_up, est.edge_cents
+        except Exception:
+            pass
+    return {
+        "market_ticker": w.market_ticker,
+        "phase": getattr(monitor, "current_phase", None),
+        "closes_at": w.closes_at.isoformat(),
+        "time_remaining_s": max(0, (w.closes_at - now).total_seconds()),
+        "strike": w.strike,
+        "spot": spot.mid if spot is not None else None,
+        "sigma": sigma,
+        "model_prob_up": model_prob,
+        "yes_bid": snap.yes_bid if snap is not None else None,
+        "yes_ask": snap.yes_ask if snap is not None else None,
+        "edge_cents": edge,
+    }
+
+
+def _feed_state(orchestrator) -> dict:
+    feed = getattr(orchestrator, "feed", None)
+    book = getattr(orchestrator, "book", None)
+    out: dict = {"composite_available": False, "constituents": [],
+                 "kalshi_ws": None}
+    if feed is not None:
+        h = feed.health()
+        out["composite_available"] = h.composite_available
+        out["healthy_count"] = h.healthy_count
+        out["constituent_count"] = h.constituent_count
+        out["constituents"] = [dataclasses.asdict(c) for c in h.constituents]
+    if book is not None:
+        w = getattr(getattr(orchestrator, "monitor", None), "current_window", None)
+        ticker = w.market_ticker if w is not None else ""
+        out["kalshi_ws"] = dataclasses.asdict(book.health(ticker))
+    return out
 
 
 def create_app(orchestrator):
@@ -60,14 +116,46 @@ def create_app(orchestrator):
                 "current_price_cents": current_price,
             })
         bankroll = exp.bankroll_cents
+        analyst = getattr(orchestrator, "analyst", None)
+        recent = list(getattr(analyst, "recent_reports", []) or [])[-4:]
         return {
             "env": "demo",
+            "mode": "paper" if getattr(orchestrator, "paper", True) else "demo-exchange",
+            "window": _window_state(orchestrator),
+            "feed": _feed_state(orchestrator),
             "exposure": dataclasses.asdict(exp),
             "unrealized_pnl_cents": unrealized_cents,
             "unrealized_pnl_pct": (100 * unrealized_cents / bankroll) if bankroll else 0.0,
             "open_trades": trades,
+            "postmortems": [dataclasses.asdict(r) for r in recent],
             "events": orchestrator.events[-100:],
         }
+
+    @app.get("/health")
+    def health():
+        """Always-on liveness: 'ok' only when every streaming dependency the
+        trader gates on is currently available. Degraded is not down — the
+        system fails closed and keeps watching."""
+        checks = {}
+        feed = getattr(orchestrator, "feed", None)
+        checks["composite"] = bool(feed is not None
+                                   and feed.health().composite_available)
+        book = getattr(orchestrator, "book", None)
+        if book is None:
+            checks["kalshi_ws"] = None  # not configured (paper w/o creds)
+        else:
+            w = getattr(getattr(orchestrator, "monitor", None),
+                        "current_window", None)
+            checks["kalshi_ws"] = bool(
+                book.health(w.market_ticker if w else "").connected)
+        checks["window_resolved"] = getattr(
+            getattr(orchestrator, "monitor", None), "current_window", None) is not None
+        halted, halt_reason = orchestrator.risk.halted()
+        checks["not_halted"] = not halted
+        ok = all(v for v in checks.values() if v is not None)
+        return {"status": "ok" if ok else "degraded", "checks": checks,
+                "halt_reason": halt_reason,
+                "ts": datetime.now(timezone.utc).isoformat()}
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):

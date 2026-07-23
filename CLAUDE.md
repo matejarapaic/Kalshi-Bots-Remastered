@@ -13,12 +13,13 @@ fair-value model → signal → size → trade → exit → postmortem. Later cr
 families (`KXETH15M`, …) are in-architecture but out of scope for the first
 pivot — nothing may hard-code BTC.
 
-> **Pivot status:** sprints 0-4 are done — sports code removed; streaming
-> feeds, window monitor, fair-value model, full trader entry/exit path, and
-> the 15-min-cadence postmortem loop (settlement polling, daily aggregate
-> notes, batched rollups/stats, crypto counterfactuals) are live. Sprint 5
-> (dashboard, agent prompts, live-guard rails) is next. Each sprint commits
-> as `sprint-N: …`.
+> **Pivot status:** sprints 0-5 are complete — the pivot's core is done.
+> Remaining before live consideration: a fresh Kalshi demo API key (the one
+> in `.env` is dead — `authentication_error NOT_FOUND` — blocking real
+> demo-exchange execution and the Kalshi WS; paper mode works fully), a
+> 24-hour paper-run review, and owner confirmation of the PROPOSED risk
+> numbers. Sprint 6 (Polymarket cross-reference) is optional and explicitly
+> gated on a clean 24h paper run.
 
 **The system is demo-only by design, enforced at multiple layers, not just by convention:**
 - `Orchestrator.__init__` refuses to start unless `KALSHI_ENV=demo`.
@@ -45,9 +46,11 @@ Do not weaken any of these gates without an explicit, direct instruction to do s
 # Run the dashboard + orchestrator loop together (auto-detects real demo-exchange
 # vs. paper simulation based on whether Kalshi credentials authenticate)
 ./.venv/bin/python -m kalshi_bots.dashboard   # http://127.0.0.1:8800
+# GET /health reports streaming-dependency status for always-on monitoring
 
-# Standalone price-feed smoke test (Sprint 1+; live network, 60s)
-./.venv/bin/python scripts/smoke_price_feed.py
+# Standalone smoke tests (live network, manual)
+./.venv/bin/python scripts/smoke_price_feed.py   # 60s composite + vol
+./.venv/bin/python scripts/smoke_kalshi_ws.py    # Kalshi WS book + BRTI (needs valid demo key)
 ```
 
 Credentials load from a gitignored `.env` at repo root via `kalshi_bots/env.py` (existing shell env vars always take precedence — the file never overrides them). Required for real (non-paper) operation: `KALSHI_KEY_ID`, `KALSHI_KEY_PATH` (PEM path); optional: `DISCORD_BOT_TOKEN`. There is no linter/formatter configured — don't invent one.

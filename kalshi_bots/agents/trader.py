@@ -5,8 +5,8 @@ data (the monitor flags, it does not vouch), matches via skill-matcher, sizes
 via risk-management, routes through Discord approval, executes limit orders,
 records trade notes in the same cycle as the fill.
 
-Re-verification is the pattern that survived the pivot: the sports trader
-re-checked odds at decision time; this trader recomputes the FairValueEstimate
+Re-verification is the pattern that survived the pivot: the prior build's
+trader re-checked its inputs at decision time; this one recomputes the FairValueEstimate
 from fresh spot/sigma/book at decision time and never trusts a signal payload.
 Every gate that fails is recorded per-condition so postmortems can audit it.
 """

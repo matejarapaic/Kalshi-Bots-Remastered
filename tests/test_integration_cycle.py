@@ -205,3 +205,136 @@ class TestCandidateEmission:
         clock["t"] += wm.CANDIDATE_COOLDOWN_S
         later = run(monitor.tick(self.MID + timedelta(seconds=40)))
         assert any(s.signal_type == "fair-value-candidate" for s in later)
+
+
+SKILL_FM = {
+    "skill": "btc-15min-fair-value", "families": ["KXBTC15M"],
+    "signal_types": ["fair-value-candidate"],
+    "market_conditions": ["live", "midpoint"], "confidence_threshold": 0.6,
+    "risk_profile": "medium", "win_rate": None, "sample_size": 0,
+    "status": "draft", "last_updated": "2026-07-22",
+}
+
+
+class FakeExecBroker:
+    """Order execution + settlement polling fake (the trader's and analyst's
+    broker). Fills IOC buys/sells at the limit price."""
+
+    def __init__(self):
+        from kalshi_bots.types import MarketRef
+        self.orders = []
+        self.book = FakeBook()
+        self.finalized: dict[str, dict] = {}
+        self._mk = lambda t: MarketRef(
+            family="crypto", series_ticker="KXBTC15M",
+            event_ticker=t.rsplit("-", 1)[0], market_ticker=t, yes_label="up",
+            title="", close_ts=None, settlement_notes=None)
+
+    def get_market(self, ticker, family=""):
+        return self._mk(ticker)
+
+    def get_orderbook(self, market):
+        return self.book.snap
+
+    def get_market_raw(self, ticker):
+        return self.finalized.get(ticker, {"ticker": ticker, "status": "closed",
+                                           "result": ""})
+
+    def finalize(self, ticker, result, expiration):
+        self.finalized[ticker] = {"ticker": ticker, "status": "finalized",
+                                  "result": result,
+                                  "expiration_value": expiration}
+
+    def place_order(self, req):
+        from kalshi_bots.types import OrderResult
+        self.orders.append(req)
+        return OrderResult(order_id=f"o{len(self.orders)}", status="filled",
+                           filled_contracts=req.contracts,
+                           avg_fill_price=req.limit_price, fee_cents=3, raw={})
+
+    def get_fills(self, ticker):
+        from kalshi_bots.types import Fill
+        if not self.orders:
+            return []
+        req = self.orders[-1]
+        return [Fill(order_id=f"o{len(self.orders)}", market_ticker=ticker,
+                     side=req.side, action=req.action, contracts=req.contracts,
+                     price=req.limit_price, taker_fee_cents=3,
+                     ts=datetime.now(UTC), raw={})]
+
+
+class TestSyntheticWindowEndToEnd:
+    """The sprint-5 deliverable: one synthetic window through the REAL
+    orchestrator/risk/discord stack — feed injects prices, book injects a
+    ladder, monitor emits lifecycle, trader enters at midpoint and exits at
+    near_close, settlement finalizes, postmortem lands in the daily note.
+    No live network anywhere."""
+
+    def test_full_window_lifecycle(self, vault, monkeypatch, tmp_path):
+        monkeypatch.setenv("KALSHI_ENV", "demo")
+        for var in ("DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "DISCORD_GUILD_ID"):
+            monkeypatch.delenv(var, raising=False)
+        vault.write_note("02-trading-skills/btc-15min-fair-value.md",
+                         dict(SKILL_FM), "# skill", caller="admin")
+
+        import kalshi_bots.agents.analyst as analyst_mod
+        aclock = {"t": 5000.0}
+        monkeypatch.setattr(analyst_mod.time, "monotonic", lambda: aclock["t"])
+
+        from kalshi_bots.orchestrator import Orchestrator
+        orch = Orchestrator(paper=True, vault=vault)
+        feed, book, broker = FakeFeed(), FakeBook(), FakeExecBroker()
+        orch.feed = feed
+        orch.book = None
+        orch.monitor = WindowMonitor(vault, FakeResolver(strike=65900.0),
+                                     book=book, feed=feed)
+        orch.trader.feed, orch.trader.book, orch.trader.broker = feed, book, broker
+        orch.analyst.broker, orch.analyst.paper = broker, None
+        # risk sizing reads the (paper) balance from orch.broker — local, fine
+
+        ticker = "KXBTC15M-26JUL222130-30"
+
+        # t0: window opens
+        s = run(orch.run_tick(T_OPEN + timedelta(seconds=5)))
+        assert s["signals"] == 1 and not s["dispositions"]
+
+        # t1: midpoint -> candidate -> REAL trader path trades through the
+        # REAL risk manager and autonomous-demo Discord approval
+        s = run(orch.run_tick(T_OPEN + timedelta(minutes=3)))
+        traded = [d for d in s["dispositions"] if d["result"].startswith("traded")]
+        assert traded, f"expected a trade, got {s['dispositions']}"
+        assert traded[0]["result"] == "traded:20x@55"  # per-window cap binds
+        assert len(orch.trader.open_trades) == 1
+        assert orch.risk.exposure().open_positions == 1
+
+        # t2: near_close -> mechanical exit sweep sells into the bid
+        s = run(orch.run_tick(T_OPEN + timedelta(minutes=13)))
+        assert any(a.endswith(":near_close_exit") for a in s["exits"])
+        assert orch.trader.open_trades == {}
+        assert orch.risk.exposure().open_positions == 0
+        sells = [o for o in broker.orders if o.action == "sell"]
+        assert sells and sells[0].contracts == 20
+
+        # t3: boundary -> window-close queued for settlement + next window opens
+        s = run(orch.run_tick(T_OPEN + timedelta(minutes=15, seconds=1)))
+        assert s["closes"] == [ticker]
+
+        # t4: settlement finalizes; analyst polls, postmortems, writes daily note
+        broker.finalize(ticker, "yes", expiration=66050.0)
+        aclock["t"] += 10
+        s = run(orch.run_tick(T_OPEN + timedelta(minutes=15, seconds=5)))
+        pm_events = [e for e in orch.events if e["kind"] == "postmortem"]
+        assert pm_events and pm_events[0]["settlement"] == "settled"
+
+        daily = vault.read_note(
+            "04-trade-history/postmortems/2026-07-23-KXBTC15M.md")
+        assert "KXBTC15M-26JUL222130" in daily.frontmatter["settled_events"]
+        assert daily.frontmatter["trades"] == 1
+        # trade note closed by the exit sweep with the recorded reason
+        from kalshi_bots.types import VaultQuery
+        notes = vault.query(VaultQuery(directory="04-trade-history/trades"))
+        assert len(notes) == 1
+        fm = notes[0].frontmatter
+        assert fm["status"] == "closed"
+        assert fm["exit_reason"] == "near_close_exit"
+        assert fm["sigma"] == 0.6  # vol-was-right input recorded at entry

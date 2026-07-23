@@ -230,6 +230,35 @@ td.num, th.num { text-align: right; }
     <div class="sub">max 6 (risk cap)</div>
   </section>
 
+  <!-- Active 15-minute window: model vs market -->
+  <section class="card" style="grid-column: span 7" aria-label="Active window">
+    <h2>Active window — model vs market</h2>
+    <div id="window-none" class="empty">No resolved window (verifying against the API…)</div>
+    <div id="window-box" style="display:none">
+      <div class="chart-head" style="flex-wrap:wrap">
+        <span class="chart-now" id="win-ticker" style="font-size:16px">—</span>
+        <span class="chip" id="win-phase">—</span>
+        <span class="sub" id="win-countdown" style="font-family:var(--font-data)">—</span>
+      </div>
+      <div style="margin-top:6px" id="win-kv">
+        <div class="bar-row"><span class="name">Spot (composite)</span><span class="amt" id="win-spot" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Strike</span><span class="amt" id="win-strike" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Model P(up)</span><span class="amt" id="win-model" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">σ (annualized)</span><span class="amt" id="win-sigma" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Market yes bid/ask</span><span class="amt" id="win-book" style="width:auto">—</span></div>
+        <div class="bar-row"><span class="name">Edge (model − ask)</span><span class="amt" id="win-edge" style="width:auto">—</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Feed health: per-constituent + Kalshi WS -->
+  <section class="card" style="grid-column: span 5" aria-label="Feed health">
+    <h2>Feed health</h2>
+    <div id="feed-health"><div class="empty">No feed data yet.</div></div>
+    <h2 style="margin-top:12px">Recent postmortems</h2>
+    <div id="pm-list"><div class="empty">No settled windows yet.</div></div>
+  </section>
+
   <!-- Streaming area chart: current value as large text KPI + pause control -->
   <section class="card chart-card" aria-label="Open position profit and loss stream">
     <h2>Open P&amp;L vs bankroll — live <span style="text-transform:none;letter-spacing:0">(last 5 min)</span></h2>
@@ -330,6 +359,10 @@ async function refreshState() {
   renderBars($("expo-skill"), e.by_skill || {});
   renderBars($("expo-event"), e.by_event || {});
   renderTrades(s.open_trades || []);
+  renderWindow(s.window);
+  renderFeedHealth(s.feed || {});
+  renderPostmortems(s.postmortems || []);
+  if (s.mode) $("kpi-env-sub").textContent = s.mode;
 
   const unrealized = s.unrealized_pnl_cents || 0;
   $("chart-pnl-pct").textContent = (s.unrealized_pnl_pct ?? 0).toFixed(2) + "% of bankroll";
@@ -363,6 +396,51 @@ function renderTrades(trades) {
     `<td class="num">${t.contracts}</td>` +
     `<td class="num">${t.entry_price_cents}</td>` +
     `<td class="num">${cents((t.contracts || 0) * 100)}</td></tr>`).join("");
+}
+
+/* ---------- active window / feed health / postmortems ---------- */
+function renderWindow(w) {
+  const has = !!w;
+  $("window-none").style.display = has ? "none" : "block";
+  $("window-box").style.display = has ? "block" : "none";
+  if (!has) return;
+  $("win-ticker").textContent = w.market_ticker || "—";
+  $("win-phase").textContent = w.phase || "—";
+  const s = Math.max(0, Math.round(w.time_remaining_s || 0));
+  $("win-countdown").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} to close`;
+  const fmt2 = {minimumFractionDigits: 2, maximumFractionDigits: 2};
+  $("win-spot").textContent = w.spot != null ? w.spot.toLocaleString("en-US", fmt2) : "—";
+  $("win-strike").textContent = w.strike != null ? w.strike.toLocaleString("en-US", fmt2) : "TBD";
+  $("win-model").textContent = w.model_prob_up != null ? (100 * w.model_prob_up).toFixed(1) + "¢ fair" : "—";
+  $("win-sigma").textContent = w.sigma != null ? (100 * w.sigma).toFixed(0) + "%" : "—";
+  $("win-book").textContent = (w.yes_bid ?? "—") + " / " + (w.yes_ask ?? "—");
+  const edge = w.edge_cents;
+  $("win-edge").textContent = edge != null ? edge.toFixed(1) + "¢" : "—";
+  $("win-edge").className = "amt " + (edge > 0 ? "pos" : edge < 0 ? "neg" : "");
+}
+
+function renderFeedHealth(f) {
+  const root = $("feed-health");
+  const rows = (f.constituents || []).map(c => {
+    const age = c.last_tick_age_s == null ? "—" : c.last_tick_age_s.toFixed(1) + "s";
+    return `<div class="bar-row"><span class="name">${c.name}</span>` +
+      `<span class="chip ${c.healthy ? "yes" : "no"}">${c.healthy ? "OK" : "STALE"}</span>` +
+      `<span class="amt">${age}</span></div>`;
+  });
+  const ws = f.kalshi_ws;
+  if (ws) rows.push(`<div class="bar-row"><span class="name">kalshi ws</span>` +
+    `<span class="chip ${ws.healthy ? "yes" : "no"}">${ws.connected ? (ws.healthy ? "OK" : "DEGRADED") : "DOWN"}</span>` +
+    `<span class="amt">${ws.seq_gap ? "seq gap" : ""}</span></div>`);
+  root.innerHTML = rows.length ? rows.join("") : '<div class="empty">No feed data yet.</div>';
+}
+
+function renderPostmortems(list) {
+  const root = $("pm-list");
+  if (!list.length) { root.innerHTML = '<div class="empty">No settled windows yet.</div>'; return; }
+  root.innerHTML = list.slice(-4).reverse().map(r =>
+    `<div class="bar-row"><span class="name" title="${r.event_id}">${(r.event_id || "").split("-").pop()}</span>` +
+    `<span class="chip">${r.settlement_status}</span>` +
+    `<span class="amt ${r.realized_pnl_cents > 0 ? "pos" : r.realized_pnl_cents < 0 ? "neg" : ""}">${cents(r.realized_pnl_cents)}</span></div>`).join("");
 }
 
 /* ---------- live feed ---------- */

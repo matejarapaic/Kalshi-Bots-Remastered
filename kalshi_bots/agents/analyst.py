@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 from kalshi_bots.skills.postmortem import Postmortem, SettlementMismatch
@@ -39,6 +40,7 @@ class Analyst:
         self._pending: dict[str, dict] = {}
         self._rollup: list[PostmortemReport] = []
         self._stats_batch: dict[str, list[dict]] = {}
+        self.recent_reports: deque[PostmortemReport] = deque(maxlen=8)  # dashboard
 
     # --- orchestrator hooks ---
 
@@ -126,6 +128,7 @@ class Analyst:
         for skill, rows in outcomes.items():
             self._stats_batch.setdefault(skill, []).extend(rows)
         self._rollup.append(report)
+        self.recent_reports.append(report)
         # traded windows are worth a message of their own, immediately
         if report.trades_audited > 0 and self.discord:
             self.discord.notify(

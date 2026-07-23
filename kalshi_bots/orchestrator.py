@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 
@@ -41,6 +42,55 @@ load_env()
 log = logging.getLogger(__name__)
 
 TICK_S = 1.0  # evaluation cadence over streaming state
+LIVE_FLAG = "--i-know-what-im-doing-crypto"
+LIVE_CONFIRM_PHRASE = "TRADE LIVE"
+
+
+def live_trading_guard(vault, argv: list[str] | None = None,
+                       confirm_input=None) -> str:
+    """The paper-first rule, enforced at startup. Returns the run mode.
+
+    KALSHI_ENV=demo -> "demo" (normal operation, no questions asked).
+    KALSHI_ENV=prod requires EXEC_MODE=live AND all three of:
+      1. the explicit `--i-know-what-im-doing-crypto` CLI flag,
+      2. a positive interactive confirmation (typed phrase),
+      3. at least one `confirmed`-status trading skill in the vault
+         (draft skills never trade live money — this re-asserts the
+         matcher's own gate independently).
+    Any single missing -> SystemExit with a clear message. Even a full pass
+    only *permits* startup: KalshiClient still refuses prod without
+    KALSHI_ALLOW_PROD=yes-i-mean-it, and DiscordBot refuses autonomous on
+    prod, so live trading is manual-approve by construction.
+    """
+    env = os.environ.get("KALSHI_ENV", "demo")
+    if env == "demo":
+        return "demo"
+    if os.environ.get("EXEC_MODE") != "live":
+        raise SystemExit(
+            "KALSHI_ENV=prod refused: EXEC_MODE=live not set. Prod paper "
+            "trading is not a thing — use KALSHI_ENV=demo.")
+    argv = sys.argv[1:] if argv is None else argv
+    if LIVE_FLAG not in argv:
+        raise SystemExit(
+            f"live crypto trading refused: missing the {LIVE_FLAG} CLI flag.")
+    ask = confirm_input or input
+    answer = ask(f"Type '{LIVE_CONFIRM_PHRASE}' to confirm real-money "
+                 f"15-minute crypto trading: ")
+    if (answer or "").strip() != LIVE_CONFIRM_PHRASE:
+        raise SystemExit(
+            "live crypto trading refused: interactive confirmation not given.")
+    from kalshi_bots.types import VaultQuery
+    notes = [n for n in vault.query(VaultQuery(directory="02-trading-skills"))
+             if n.frontmatter.get("status") == "confirmed"
+             and not n.path.endswith("_skill-template.md")]
+    if not notes:
+        raise SystemExit(
+            "live crypto trading refused: no confirmed-status trading skill "
+            "in the vault. Draft skills never trade live money — confirm one "
+            "after >=30 settled demo samples and an owner review.")
+    log.warning("LIVE TRADING GUARD PASSED: %d confirmed skill(s); execution "
+                "will be manual-approve (autonomous is demo-only)", len(notes))
+    return "live"
 
 
 class Orchestrator:
@@ -50,13 +100,13 @@ class Orchestrator:
         KALSHI_KEY_ID/KALSHI_KEY_PATH authenticate successfully, else falls
         back to PaperBroker simulation. Pass True/False to force either mode
         regardless of credentials."""
-        env = os.environ.get("KALSHI_ENV", "demo")
-        if env != "demo":
-            raise RuntimeError("orchestrator refuses to start: KALSHI_ENV must be "
-                               "demo until the live-trading guard flow (sprint-5) "
-                               "is explicitly exercised by a human")
         self.series = series
         self.vault = vault or Vault()
+        # paper-first: demo passes straight through; prod demands the full
+        # three-gate flow (flag + typed confirmation + confirmed skill) and
+        # even then remains manual-approve + KALSHI_ALLOW_PROD-gated
+        self.mode = live_trading_guard(self.vault)
+        env = os.environ.get("KALSHI_ENV", "demo")
         self.kalshi = KalshiClient()
         if paper is None:
             try:
@@ -98,7 +148,8 @@ class Orchestrator:
         transport = gateway or (DiscordTransport(discord_token, discord_channel)
                                 if discord_token and discord_channel else ConsoleTransport())
         self.discord = DiscordBot(self.risk, self.vault, transport=transport,
-                                  mode="autonomous")
+                                  mode="autonomous" if self.mode == "demo"
+                                  else "manual_approve")
         if gateway is not None:
             gateway.bind(self.discord)  # bind before start: no window with bot_ref unset
             try:

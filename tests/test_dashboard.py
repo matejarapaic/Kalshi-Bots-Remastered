@@ -15,6 +15,9 @@ class FakeRisk:
                                daily_realized_pnl_cents=0, halted=False,
                                halt_reason=None)
 
+    def halted(self):
+        return False, None
+
 
 class FakeOrchestrator:
     def __init__(self):
@@ -47,10 +50,83 @@ def test_index_serves_html(client):
 def test_state_contract_shape(client):
     c, _ = client
     s = c.get("/api/state").json()
-    assert set(s.keys()) == {"env", "exposure", "unrealized_pnl_cents",
-                             "unrealized_pnl_pct", "open_trades", "events"}
+    assert set(s.keys()) == {"env", "mode", "window", "feed", "exposure",
+                             "unrealized_pnl_cents", "unrealized_pnl_pct",
+                             "open_trades", "postmortems", "events"}
     evt = s["events"][-1]
     assert {"series", "event_id", "signal_type"} <= set(evt.keys())
+    assert s["window"] is None  # no monitor on the fake -> renders empty
+    assert s["feed"]["composite_available"] is False
+
+
+def test_window_state_renders_model_vs_market():
+    from datetime import datetime, timedelta, timezone
+    from kalshi_bots.types import (
+        CompositeSpot, DepthLevel, MarketRef, OrderbookSnapshot, WindowRef,
+    )
+
+    now = datetime.now(timezone.utc)
+    w = WindowRef(series_ticker="KXBTC15M", event_ticker="E",
+                  market_ticker="E-30", opens_at=now - timedelta(minutes=5),
+                  closes_at=now + timedelta(minutes=10), strike=65900.0)
+
+    class Monitor:
+        current_window = w
+        current_phase = "midpoint"
+
+    class Feed:
+        def current_composite(self):
+            return CompositeSpot(mid=66000.0, bid=65999.5, ask=66000.5,
+                                 source_ts={}, computed_at=now,
+                                 constituents_healthy=5, constituent_count=5)
+
+        def realized_vol(self, window_s=900):
+            return 0.6
+
+        def health(self):
+            from kalshi_bots.types import FeedHealth
+            return FeedHealth(constituents=[], healthy_count=5,
+                              constituent_count=5, composite_available=True)
+
+    class Book:
+        def snapshot(self, ticker):
+            m = MarketRef(family="crypto", series_ticker="KXBTC15M",
+                          event_ticker="E", market_ticker="E-30",
+                          yes_label="up", title="", close_ts=None,
+                          settlement_notes=None)
+            return OrderbookSnapshot(market=m, yes_bid=53, yes_ask=55,
+                                     no_bid=45, no_ask=47,
+                                     yes_book=[DepthLevel(55, 500)],
+                                     no_book=[DepthLevel(47, 500)],
+                                     devigged_yes_prob=0.54, spread_cents=2,
+                                     fetched_at=now)
+
+        def health(self, ticker):
+            from kalshi_bots.types import BookHealth
+            return BookHealth(market_ticker=ticker, connected=True,
+                              subscribed=True, last_update_age_s=0.5,
+                              seq_gap=False, healthy=True)
+
+    orch = FakeOrchestrator()
+    orch.monitor, orch.feed, orch.book = Monitor(), Feed(), Book()
+    s = TestClient(create_app(orch)).get("/api/state").json()
+    win = s["window"]
+    assert win["market_ticker"] == "E-30" and win["phase"] == "midpoint"
+    assert win["strike"] == 65900.0 and win["spot"] == 66000.0
+    assert win["model_prob_up"] > 0.5          # spot above strike
+    assert win["edge_cents"] == pytest.approx(win["model_prob_up"] * 100 - 55)
+    assert s["feed"]["kalshi_ws"]["healthy"] is True
+
+
+def test_health_endpoint_reports_degraded_and_ok():
+    orch = FakeOrchestrator()
+    c = TestClient(create_app(orch))
+    h = c.get("/health").json()
+    # bare fake: no feed composite, no window -> degraded but alive
+    assert h["status"] == "degraded"
+    assert h["checks"]["composite"] is False
+    assert h["checks"]["kalshi_ws"] is None     # not configured
+    assert h["checks"]["not_halted"] is True
 
 
 class FakeBroker:
