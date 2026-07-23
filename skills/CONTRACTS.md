@@ -196,6 +196,34 @@ class OrderResult:
     fee_cents: int
     raw: dict                   # full API response for the trade note
 
+# --- crypto-price-feed types (sprint-1) ---
+# BTC spot prices are float dollars (market data, not ledger money — the
+# integer-cents rule applies to Kalshi contract prices and bankroll only).
+
+@dataclass
+class CompositeSpot:
+    mid: float                      # weighted median of healthy constituents' mids
+    bid: float                      # median constituent bid (same health filter)
+    ask: float
+    source_ts: dict[str, datetime]  # per-exchange: source's own tick timestamp
+    computed_at: datetime           # when the composite was computed (UTC)
+    constituents_healthy: int
+    constituent_count: int
+
+@dataclass
+class ConstituentHealth:
+    name: str
+    connected: bool                 # WS session currently open
+    last_tick_age_s: float | None   # None = never ticked since start
+    healthy: bool                   # connected AND last tick <= STALE_CONSTITUENT_S
+
+@dataclass
+class FeedHealth:
+    constituents: list[ConstituentHealth]
+    healthy_count: int
+    constituent_count: int
+    composite_available: bool       # healthy_count >= MIN_HEALTHY_CONSTITUENTS
+
 @dataclass
 class VaultNote:
     path: str                   # vault-relative, e.g. "02-trading-skills/x.md"

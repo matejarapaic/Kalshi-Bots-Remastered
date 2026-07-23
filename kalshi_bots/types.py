@@ -314,6 +314,37 @@ class ApprovalOutcome:
 
 # --- postmortem new types ---
 
+# --- crypto-price-feed new types (sprint-1) ---
+# BTC spot prices are float dollars (market data, not ledger money — the
+# integer-cents rule applies to Kalshi contract prices and bankroll only).
+
+@dataclass
+class CompositeSpot:
+    mid: float
+    bid: float
+    ask: float
+    source_ts: dict[str, datetime]
+    computed_at: datetime
+    constituents_healthy: int
+    constituent_count: int
+
+
+@dataclass
+class ConstituentHealth:
+    name: str
+    connected: bool
+    last_tick_age_s: float | None
+    healthy: bool
+
+
+@dataclass
+class FeedHealth:
+    constituents: list[ConstituentHealth]
+    healthy_count: int
+    constituent_count: int
+    composite_available: bool
+
+
 @dataclass
 class PostmortemReport:
     league: LeagueId
