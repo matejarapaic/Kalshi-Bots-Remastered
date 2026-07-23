@@ -16,6 +16,7 @@ on_settle(s: Settlement, market: MarketRef, skill_name: str) -> None
 exposure() -> ExposureSummary
 halted() -> tuple[bool, str | None]               # (halted, reason)
 set_halt(on: bool, reason: str, caller: str) -> None
+reconcile() -> bool                               # startup: live vs ledger, self-heals settled-while-down
 ```
 
 Exceptions: `RiskError` (base — infra only: ledger unreadable, balance fetch failed), `RiskUnknownSkill`.
@@ -72,7 +73,7 @@ The parameter table above **is** the configuration; implemented as one Python mo
 - **Unknown skill name:** `RiskUnknownSkill` — a misconfigured skill must never size with borrowed numbers.
 - **p ≤ fee-adjusted breakeven:** `capped_by=["no_edge"]`, contracts 0 (rule 1).
 - **Depth thinner than one contract at the cap:** contracts 0, `capped_by=["depth_gate"]`.
-- **Ledger/live divergence** (Kalshi position exists that ledger doesn't know): detected on startup reconcile via `get_positions()`; mismatch → halt + alert (never trade on a ledger known to be wrong).
+- **Ledger/live divergence:** detected on startup via `reconcile()` (`get_positions()` vs the ledger). A ledger position missing from live is checked against `get_settlements(ticker)` first — settled-while-down is the expected restart case, self-healed here (position popped, P&L booked from the ledger's own cost basis and the settlement's win/loss result, `daily_pnl` updated, `last_reconcile_settled[ticker]` exposed for the trader to close the matching trade note) rather than halted. Only an unexplained difference — a live position the ledger doesn't know about ("ghost"), or a missing ledger position with no settlement record yet — halts + alerts (never trade on a ledger known to be wrong). Deliberately does **not** trust the settlement's `revenue_cents` for P&L, since that field reflects the whole account's history on that market, not just this ledger's position. A halt `reconcile()` itself set auto-clears the moment a later call finds everything explained (e.g. the settlement record shows up a minute after the first restart's reconcile ran) — a manual halt (`caller="discord"`) never auto-clears; only a human `/resume` lifts one of those.
 - **Partial fills:** `on_fill` records actual filled contracts; unfilled remainder releases its exposure reservation when the order is canceled/expires (trader manages the order; ledger reserves on `size()`? — no: reservation happens at `on_fill` only; the serialization lock plus immediate fill-or-cancel trading style keeps the race window acceptable; documented limitation).
 - **Same-team correlated markets** (e.g. a future series/championship market on a team currently playing): counts as same-game for correlation scaling; detection via team pair, not just event id.
 - **ET day rollover mid-session:** daily P&L buckets keyed by ET calendar date; a halt from yesterday clears at rollover automatically (reason logged).
@@ -86,7 +87,7 @@ kalshi-client (balance, fee estimates, positions for reconcile), vault (ledger p
 - Order-of-operations: fixtures where each cap (4)–(11) is the binding one, asserting `capped_by` contents and order.
 - Correlation: second position on same event scaled ×0.5; same-team different-market counted.
 - Daily-loss halt: losses crossing the threshold mid-day block entry #N+1; ET rollover unblocks; restart persistence.
-- Ledger: fill→exit→settle lifecycle; startup reconcile mismatch → halt.
+- Ledger: fill→exit→settle lifecycle; startup reconcile mismatch → halt; reconcile self-heals a ledger position that settled while down (P&L booked, position popped, no halt) vs. still halting on a live position the ledger can't explain.
 - Serialization: two concurrent size() calls against headroom for one — exactly one sized.
 
 ## New types

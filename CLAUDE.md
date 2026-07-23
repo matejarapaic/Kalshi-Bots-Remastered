@@ -73,7 +73,7 @@ The nine skills in `kalshi_bots/skills/` were built in this order and still depe
 
 ### Known gaps (real, not hypothetical — read before touching restart/scheduling logic)
 
-- `Trader.open_trades` (which drives exit-management/invalidation checks) is pure in-memory and is **not** reconstructed from the vault or the risk ledger on restart. A position still open when the process stops loses active exit management until manually handled — the risk ledger and Kalshi's own position stay accurate, but nothing will proactively exit it.
+- `Trader.open_trades` is pure in-memory but *is* reconstructed on restart: `Orchestrator.__init__` calls `RiskManager.reconcile()` (self-heals ledger positions that settled while the process was down, using Kalshi settlements — halts only on a genuinely unexplained live/ledger difference) then `Trader.reload_open_trades()` (repopulates `open_trades` from vault trade notes still `status: open`, and closes out the ones `reconcile()` found had settled). This covers the case of the process being killed and restarted; it does not cover an in-place code reload that skips `Orchestrator.__init__`.
 - `Orchestrator.run()` computes "today" once at startup and never re-checks for an ET-midnight rollover; a process left running past midnight keeps operating against a stale date (stale daily-slate note, stale per-day match cache in `league_matching.py`) until restarted.
 - `Analyst.nightly_slate()` (a next-day slate preview) exists but is never called automatically by anything.
 

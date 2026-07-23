@@ -17,6 +17,7 @@ class FakeKalshi:
     def __init__(self, balance=50_000):
         self.balance = balance
         self.positions = []
+        self.settlements: dict[str, list] = {}
 
     def get_balance(self):
         if self.balance is None:
@@ -25,6 +26,9 @@ class FakeKalshi:
 
     def get_positions(self):
         return self.positions
+
+    def get_settlements(self, ticker):
+        return self.settlements.get(ticker, [])
 
 
 def market(ticker="KXMLBGAME-26JUL191920LADNYY-NYY", team="NYY"):
@@ -218,6 +222,64 @@ class TestLedgerLifecycle:
         rm.kalshi.positions = [Position("GHOST", "yes", 5, 50, 0, {})]
         assert rm.reconcile() is False
         assert rm.halted()[0] is True
+
+    def test_reconcile_self_heals_settled_win(self, rm):
+        """A ledger position missing from live, with a matching settlement,
+        is a restart-while-the-game-finished case: self-heal, don't halt."""
+        m = market("T-SETTLED")
+        rm.on_fill(fill(5, 52, fee=8), m, "sportsbook-kalshi-divergence", "e1")
+        rm.kalshi.positions = []  # nothing live: it settled
+        rm.kalshi.settlements["T-SETTLED"] = [
+            Settlement(market_ticker="T-SETTLED", result="yes", settled_ts=NOW,
+                      revenue_cents=999999, raw={})  # revenue_cents must be ignored
+        ]
+        assert rm.reconcile() is True
+        assert rm.halted()[0] is False
+        assert "T-SETTLED" not in rm._positions
+        assert rm.last_reconcile_settled["T-SETTLED"].result == "yes"
+        # pnl from ledger's own cost basis (5*100 - (5*52+8)=232), not revenue_cents
+        assert rm.exposure().daily_realized_pnl_cents == 232
+
+    def test_reconcile_self_heals_settled_loss(self, rm):
+        m = market("T-LOST")
+        rm.on_fill(fill(7, 26, fee=9), m, "sportsbook-kalshi-divergence", "e1")
+        rm.kalshi.positions = []
+        rm.kalshi.settlements["T-LOST"] = [
+            Settlement(market_ticker="T-LOST", result="no", settled_ts=NOW,
+                      revenue_cents=0, raw={})
+        ]
+        assert rm.reconcile() is True
+        assert rm.exposure().daily_realized_pnl_cents == -(7 * 26 + 9)
+
+    def test_reconcile_halts_on_unexplained_missing_position(self, rm):
+        """Missing from live and no settlement record yet -> still halt."""
+        m = market("T-UNKNOWN")
+        rm.on_fill(fill(3, 40, fee=1), m, "sportsbook-kalshi-divergence", "e1")
+        rm.kalshi.positions = []
+        assert rm.reconcile() is False
+        assert rm.halted()[0] is True
+        assert "T-UNKNOWN" in rm._positions  # not popped: nothing to explain it away
+
+    def test_reconcile_clears_a_halt_it_set_once_resolved(self, rm):
+        """A halt reconcile set for an unexplained mismatch lifts on its own
+        the moment a settlement record shows up (e.g. Kalshi settles it a
+        minute after the first restart-triggered reconcile ran)."""
+        m = market("T-SLOW-SETTLE")
+        rm.on_fill(fill(4, 30, fee=2), m, "sportsbook-kalshi-divergence", "e1")
+        rm.kalshi.positions = []
+        assert rm.reconcile() is False  # no settlement yet -> halt
+        assert rm.halted()[0] is True
+        rm.kalshi.settlements["T-SLOW-SETTLE"] = [
+            Settlement(market_ticker="T-SLOW-SETTLE", result="yes", settled_ts=NOW,
+                      revenue_cents=0, raw={})
+        ]
+        assert rm.reconcile() is True
+        assert rm.halted() == (False, None)
+
+    def test_reconcile_does_not_clear_a_manual_halt(self, rm):
+        rm.set_halt(True, "operator called it", caller="discord")
+        assert rm.reconcile() is True  # nothing live, nothing in ledger: clean
+        assert rm.halted()[0] is True  # but a human set this — stays halted
 
 
 class TestIntentSerialization:

@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from kalshi_bots.skills.kalshi_client import depth_within, est_fee_cents
 from kalshi_bots.skills.skill_matcher import SkillMatcher
 from kalshi_bots.types import (
-    CandidateSignal, GameState, OrderRequest, SizingRequest, TradeCard,
+    CandidateSignal, GameState, OrderRequest, Settlement, SizingRequest,
+    TradeCard, VaultQuery,
 )
 
 log = logging.getLogger(__name__)
@@ -42,6 +43,53 @@ class Trader:
         self.env = env
         self._gap_history: dict[str, list] = {}   # persistence tracking
         self.open_trades: dict[str, dict] = {}    # market_ticker -> trade meta
+
+    # --- restart recovery ---
+
+    def reload_open_trades(self, settled: dict[str, Settlement] | None = None) -> dict[str, int]:
+        """Repopulate open_trades from vault trade notes still marked
+        status=open, so exit management resumes after an abrupt restart
+        instead of silently going dark (open_trades is otherwise pure
+        in-memory). `settled` is RiskManager.reconcile()'s
+        last_reconcile_settled — tickers it discovered had settled while the
+        process was down; those trade notes are closed out here (using the
+        note's own recorded contracts/entry price, the same math postmortem
+        uses) instead of being restored for exit management."""
+        settled = settled or {}
+        notes = self.vault.query(VaultQuery(directory="04-trade-history/trades",
+                                            frontmatter_filters={"status": "open"}))
+        restored = closed = 0
+        for note in notes:
+            fm = note.frontmatter
+            coid = fm.get("client_order_id")
+            ticker = fm.get("market_ticker")
+            if not coid or not ticker:
+                continue
+            s = settled.get(ticker)
+            if s is not None:
+                contracts = fm.get("contracts", 0)
+                cost = contracts * fm.get("entry_price_cents", 0) + fm.get("fee_cents", 0)
+                won = s.result == fm.get("side")
+                pnl = (contracts * 100 - cost) if won else -cost
+                self._close_trade_note(note.path, "settled_while_down", None, pnl)
+                closed += 1
+                continue
+            try:
+                market = self.broker.get_market(ticker, league=fm.get("league", ""))
+            except Exception as e:
+                log.error("reload_open_trades: market fetch failed for %s: %s", ticker, e)
+                continue
+            opened_at = fm.get("opened_at")
+            self.open_trades[coid] = {
+                "market_ticker": ticker, "skill": fm.get("skill"), "side": fm.get("side"),
+                "contracts": fm.get("contracts", 0), "entry_price": fm.get("entry_price_cents"),
+                "espn_event_id": fm.get("espn_event_id"), "league": fm.get("league"),
+                "opened_at": datetime.fromisoformat(opened_at) if opened_at
+                            else datetime.now(timezone.utc),
+                "note": note.path, "market": market,
+            }
+            restored += 1
+        return {"restored": restored, "closed": closed}
 
     # --- signal handling ---
 

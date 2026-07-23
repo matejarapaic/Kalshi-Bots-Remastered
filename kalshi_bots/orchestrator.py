@@ -105,6 +105,14 @@ class Orchestrator:
                                    kalshi=self.kalshi, odds=self.odds)
         self.trader = Trader(self.vault, self.broker, self.matcher, self.risk,
                              self.discord, env="demo")
+        try:
+            counts = self.trader.reload_open_trades(self.risk.last_reconcile_settled)
+            if counts["restored"] or counts["closed"]:
+                log.info("restart recovery: restored %d open trade(s) for exit "
+                         "management, closed %d that settled while down",
+                         counts["restored"], counts["closed"])
+        except Exception as e:
+            log.warning("open-trade reload skipped: %s", e)
         self.analyst = Analyst(self.vault, self.broker, self.espn,
                                discord=self.discord, env="demo",
                                paper_broker=self.broker if paper else None)

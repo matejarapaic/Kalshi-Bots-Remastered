@@ -5,6 +5,7 @@ system is named here (risk params below) — no other module may inline one.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from kalshi_bots.types import (
     ExposureSummary, Fill, MarketRef, Settlement, SizingRequest, SizingResult,
 )
 
+log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 # ---------------------------------------------------------------------------
@@ -77,6 +79,11 @@ class RiskManager:
         self._halted = False
         self._halt_reason: str | None = None
         self._intents: dict[str, dict] = {}     # ticker|skill -> intent
+        # populated by reconcile(): ticker -> Settlement, for positions that
+        # settled while the process was down and were self-healed out of the
+        # ledger here (rather than halting) — trader consumes this to close
+        # the matching trade notes on restart.
+        self.last_reconcile_settled: dict[str, Settlement] = {}
         self._load()
 
     # --- persistence (via the vault skill; write-through, restart-safe) ---
@@ -327,12 +334,54 @@ class RiskManager:
             self._persist()
 
     def reconcile(self) -> bool:
-        """Startup check: live Kalshi positions vs ledger. Mismatch -> halt."""
+        """Startup check: live Kalshi positions vs ledger.
+
+        A ledger position missing from live is checked against Kalshi
+        settlements first — the common restart case is "it settled while the
+        process was down," which is self-healed here (position popped, P&L
+        booked from our own recorded cost basis, *not* from the settlement's
+        `revenue_cents`, since that field reflects the whole account's
+        history on that market, not just this position) rather than halted.
+        Only a genuinely unexplained difference — a live position the ledger
+        doesn't know about, or a missing one with no settlement record —
+        halts for a human to look at.
+        """
         with self._lock:
+            self.last_reconcile_settled = {}
             live = {p.market_ticker: p.contracts for p in self.kalshi.get_positions()}
+            unexplained: dict[str, str] = {}
+            for ticker, p in list(self._positions.items()):
+                if ticker in live:
+                    continue
+                try:
+                    settlements = self.kalshi.get_settlements(ticker)
+                except Exception as e:
+                    unexplained[ticker] = f"settlement fetch failed: {e}"
+                    continue
+                if not settlements:
+                    unexplained[ticker] = "no live position, no settlement record"
+                    continue
+                s = settlements[0]
+                won = s.result == p["side"]
+                pnl = (p["contracts"] * 100 - p["cost_cents"]) if won else -p["cost_cents"]
+                day = self._et_today()
+                self._daily_pnl[day] = self._daily_pnl.get(day, 0) + pnl
+                self._positions.pop(ticker, None)
+                self.last_reconcile_settled[ticker] = s
+                log.info("reconcile: %s settled %s while down (pnl=%dc) — ledger updated",
+                         ticker, s.result, pnl)
             ours = {t: p["contracts"] for t, p in self._positions.items()}
-            if live != ours:
-                self.set_halt(True, f"ledger/live mismatch: live={live} ledger={ours}",
-                              caller="reconcile")
+            if ours != live or unexplained:
+                reason = f"ledger/live mismatch: live={live} ledger={ours}"
+                if unexplained:
+                    reason += f" unexplained={unexplained}"
+                self.set_halt(True, reason, caller="reconcile")
                 return False
+            # Clean: auto-clear a halt only if reconcile itself set it (a prior
+            # mismatch that has now resolved) — a manual halt (caller=discord)
+            # must survive restart until a human explicitly /resumes it.
+            if self._halted and (self._halt_reason or "").endswith("(by reconcile)"):
+                self.set_halt(False, "", caller="reconcile")
+            else:
+                self._persist()  # write back any self-healed positions
             return True
