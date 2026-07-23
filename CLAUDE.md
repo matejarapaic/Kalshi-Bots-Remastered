@@ -13,13 +13,17 @@ fair-value model → signal → size → trade → exit → postmortem. Later cr
 families (`KXETH15M`, …) are in-architecture but out of scope for the first
 pivot — nothing may hard-code BTC.
 
-> **Pivot status:** sprints 0-5 are complete — the pivot's core is done.
-> Remaining before live consideration: a fresh Kalshi demo API key (the one
-> in `.env` is dead — `authentication_error NOT_FOUND` — blocking real
-> demo-exchange execution and the Kalshi WS; paper mode works fully), a
-> 24-hour paper-run review, and owner confirmation of the PROPOSED risk
-> numbers. Sprint 6 (Polymarket cross-reference) is optional and explicitly
-> gated on a clean 24h paper run.
+> **Pivot status:** sprints 0-5 are complete — the pivot's core is done. A
+> fresh demo API key (2026-07-23) unblocked real demo-exchange execution and
+> the Kalshi WS; both are now live-verified via `scripts/smoke_kalshi_ws.py`
+> (that run also caught and fixed a real bug — `cfbenchmarks_value.data` is a
+> JSON-encoded string, not an object). With working credentials, the
+> orchestrator auto-detects real demo-exchange execution instead of
+> `PaperBroker` — orders place against Kalshi's actual demo matching engine,
+> and `autonomous` mode (demo-only, by design) auto-approves entries with no
+> human click. Remaining before live consideration: a 24-hour real-demo-run
+> review and owner confirmation of the PROPOSED risk numbers. Sprint 6
+> (Polymarket cross-reference) is optional and explicitly gated on that run.
 
 **The system is demo-only by design, enforced at multiple layers, not just by convention:**
 - `Orchestrator.__init__` refuses to start unless `KALSHI_ENV=demo`.
@@ -50,7 +54,7 @@ Do not weaken any of these gates without an explicit, direct instruction to do s
 
 # Standalone smoke tests (live network, manual)
 ./.venv/bin/python scripts/smoke_price_feed.py   # 60s composite + vol
-./.venv/bin/python scripts/smoke_kalshi_ws.py    # Kalshi WS book + BRTI (needs valid demo key)
+./.venv/bin/python scripts/smoke_kalshi_ws.py    # Kalshi WS book + BRTI (needs valid demo key; verified working 2026-07-23)
 ```
 
 Credentials load from a gitignored `.env` at repo root via `kalshi_bots/env.py` (existing shell env vars always take precedence — the file never overrides them). Required for real (non-paper) operation: `KALSHI_KEY_ID`, `KALSHI_KEY_PATH` (PEM path); optional: `DISCORD_BOT_TOKEN`. There is no linter/formatter configured — don't invent one.
