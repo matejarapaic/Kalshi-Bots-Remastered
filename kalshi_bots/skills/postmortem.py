@@ -1,12 +1,12 @@
 """postmortem skill. Spec: skills/postmortem/SKILL.md.
 
-Triggered on game-final. Audits trades, computes declined-candidate
+Triggered on window-close. Audits trades, computes declined-candidate
 counterfactuals, updates skill stats (sole writer), writes the postmortem note.
 Batch context: reads may bypass the cache, writes go through the vault skill.
 
 Spec deviation (flagged 2026-07-17): v1 counterfactuals hold declined entries
 to settlement instead of replaying each skill's invalidation rules against the
-intra-game price log — the log granularity recorded by game-monitor v1 is not
+intra-window price log — the log granularity recorded by the monitor v1 is not
 sufficient for a faithful replay. The assumption is stated in each note.
 """
 from __future__ import annotations
@@ -40,12 +40,12 @@ class Postmortem:
         self.discord = discord_bot
         self.env = env
 
-    def _note_path(self, league: str, eid: str) -> str:
+    def _note_path(self, family: str, eid: str) -> str:
         day = datetime.now(timezone.utc).date().isoformat()
-        return f"04-trade-history/postmortems/{day}-{league}-{eid}.md"
+        return f"04-trade-history/postmortems/{day}-{family}-{eid}.md"
 
-    def run(self, league: str, espn_event_id: str) -> PostmortemReport:
-        note_path = self._note_path(league, espn_event_id)
+    def run(self, family: str, event_id: str) -> PostmortemReport:
+        note_path = self._note_path(family, event_id)
         # idempotency
         try:
             existing = self.vault.read_note(note_path)
@@ -54,25 +54,25 @@ class Postmortem:
         except Exception:
             pass
 
-        game_note = None
+        window_note = None
         try:
-            game_note = self.vault.read_note(
-                f"03-market-context/active-games/{league}-{espn_event_id}.md")
+            window_note = self.vault.read_note(
+                f"03-market-context/active-windows/{event_id}.md")
         except Exception:
-            log.warning("no active-game note for %s-%s (RECORD GAP)",
-                        league, espn_event_id)
+            log.warning("no active-window note for %s-%s (RECORD GAP)",
+                        family, event_id)
 
         trades = self.vault.query(VaultQuery(
             directory="04-trade-history/trades",
-            frontmatter_filters={"espn_event_id": espn_event_id}))
+            frontmatter_filters={"event_id": event_id}))
 
         # --- settlement truth + cross-check ---
         settlement_status = "settled"
         mismatch_details = []
         settled_results: dict[str, str] = {}
         tickers = {t.frontmatter.get("market_ticker") for t in trades}
-        if game_note and game_note.frontmatter.get("market_ticker"):
-            tickers.add(game_note.frontmatter["market_ticker"])
+        if window_note and window_note.frontmatter.get("market_ticker"):
+            tickers.add(window_note.frontmatter["market_ticker"])
         tickers.discard(None)
         for ticker in tickers:
             try:
@@ -88,16 +88,16 @@ class Postmortem:
             settled_results[ticker] = s.result
             if s.result == "void":
                 settlement_status = "voided"
-            elif game_note is not None:
-                fm = game_note.frontmatter
-                yes_team = fm.get("yes_team_kalshi_abbr")
-                winner = fm.get("winner_kalshi_abbr")
-                if yes_team and winner and ticker == fm.get("market_ticker"):
-                    expected = "yes" if winner == yes_team else "no"
+            elif window_note is not None:
+                fm = window_note.frontmatter
+                yes_label = fm.get("yes_label")
+                winner = fm.get("settled_direction")
+                if yes_label and winner and ticker == fm.get("market_ticker"):
+                    expected = "yes" if winner == yes_label else "no"
                     if s.result != expected:
                         settlement_status = "mismatch"
                         mismatch_details.append(
-                            f"{ticker}: Kalshi settled {s.result}, ESPN implies {expected}")
+                            f"{ticker}: Kalshi settled {s.result}, window log implies {expected}")
 
         # --- per-trade audit ---
         entry_violations = 0
@@ -134,16 +134,16 @@ class Postmortem:
         # --- declined-candidate counterfactuals ---
         declined = []
         cf_pnl = 0
-        if game_note:
+        if window_note:
             traded_signals = {t.frontmatter.get("signal_id") for t in trades}
-            for line in game_note.body.splitlines():
+            for line in window_note.body.splitlines():
                 if not line.startswith("- SIGNAL "):
                     continue
                 try:
                     sig = json.loads(line[len("- SIGNAL "):])
                 except json.JSONDecodeError:
                     continue
-                if sig.get("id") in traded_signals or sig.get("type") == "game-final":
+                if sig.get("id") in traded_signals or sig.get("type") == "window-close":
                     continue
                 price = sig.get("entry_price_cents")
                 side = sig.get("side", "yes")
@@ -194,12 +194,12 @@ class Postmortem:
 
         # --- write the note ---
         fm = {"date": datetime.now(timezone.utc).date().isoformat(),
-              "league": league, "espn_event_id": espn_event_id,
+              "family": family, "event_id": event_id,
               "settlement_status": settlement_status,
               "realized_pnl_cents": realized,
               "counterfactual_pnl_cents": cf_pnl,
               "trades": len(trades), "declined": len(declined), "env": self.env}
-        body_lines = [f"# Postmortem {league} {espn_event_id}", ""]
+        body_lines = [f"# Postmortem {family} {event_id}", ""]
         if mismatch_details:
             body_lines += ["## ⚠ SETTLEMENT MISMATCH"] + mismatch_details + [""]
         if threshold_flags:
@@ -235,7 +235,7 @@ class Postmortem:
             raise SettlementMismatch("; ".join(mismatch_details))
 
         return PostmortemReport(
-            league=league, espn_event_id=espn_event_id, trades_audited=len(trades),
+            family=family, event_id=event_id, trades_audited=len(trades),
             entry_violations=entry_violations, exit_deviations=exit_deviations,
             declined_candidates=len(declined), counterfactual_pnl_cents=cf_pnl,
             realized_pnl_cents=realized, settlement_status=settlement_status,
@@ -245,7 +245,7 @@ class Postmortem:
     def _report_from_note(note, note_path) -> PostmortemReport:
         fm = note.frontmatter
         return PostmortemReport(
-            league=fm.get("league"), espn_event_id=fm.get("espn_event_id"),
+            family=fm.get("family"), event_id=fm.get("event_id"),
             trades_audited=fm.get("trades", 0), entry_violations=0,
             exit_deviations=0, declined_candidates=fm.get("declined", 0),
             counterfactual_pnl_cents=fm.get("counterfactual_pnl_cents", 0),

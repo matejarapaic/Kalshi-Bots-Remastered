@@ -11,10 +11,10 @@ from kalshi_bots.skills.kalshi_client import (
 )
 from kalshi_bots.types import MarketRef, OrderRequest
 
-MARKET = MarketRef(league="mlb", series_ticker="KXMLBGAME",
-                   event_ticker="KXMLBGAME-26JUL191920LADNYY",
-                   market_ticker="KXMLBGAME-26JUL191920LADNYY-NYY",
-                   yes_team_kalshi_abbr="NYY", title="t", close_ts=None,
+MARKET = MarketRef(family="crypto", series_ticker="KXBTC15M",
+                   event_ticker="KXBTC15M-26JUL222130",
+                   market_ticker="KXBTC15M-26JUL222130-30",
+                   yes_label="up", title="t", close_ts=None,
                    settlement_notes=None)
 
 
@@ -165,7 +165,7 @@ REAL_EXECUTED_ORDER = {
     "self_trade_prevention_type": "taker_at_cross", "side": "yes",
     "status": "executed", "subaccount_number": 0,
     "taker_fees_dollars": "0.070000", "taker_fill_cost_dollars": "1.960000",
-    "ticker": "KXMLBGAME-26JUL171905LADNYY-NYY", "type": "limit",
+    "ticker": "KXBTC15M-26JUL222130-30", "type": "limit",
     "user_id": "c197aa39-3f37-4460-8a97-d6975d0c90d5", "yes_price_dollars": "0.4900",
 }
 

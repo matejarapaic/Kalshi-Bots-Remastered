@@ -7,8 +7,9 @@ from kalshi_bots.types import VaultQuery
 
 SKILL_NOTE = """---
 skill: test-skill
-sports: [mlb]
-market_conditions: [live, endgame]
+families: [KXBTC15M]
+signal_types: [fair-value-candidate]
+market_conditions: [live, near_close]
 confidence_threshold: 0.6
 risk_profile: low
 win_rate: null
@@ -27,7 +28,7 @@ and unicode — ✓.
 @pytest.fixture
 def vault(tmp_path):
     root = tmp_path / "vault"
-    for d in ("00-meta", "02-trading-skills", "03-market-context/active-games",
+    for d in ("00-meta", "02-trading-skills", "03-market-context/active-windows",
               "04-trade-history/trades"):
         (root / d).mkdir(parents=True)
     (root / "02-trading-skills" / "test-skill.md").write_text(SKILL_NOTE)
@@ -64,7 +65,7 @@ class TestQuery:
         assert vault.query(VaultQuery(directory="02-trading-skills",
                                       tag_filters=["live"]))
         assert not vault.query(VaultQuery(directory="02-trading-skills",
-                                          tag_filters=["pregame"]))
+                                          tag_filters=["opening"]))
 
     def test_malformed_note_skipped(self, vault, tmp_path):
         (tmp_path / "vault" / "02-trading-skills" / "bad.md").write_text(
@@ -92,7 +93,7 @@ class TestScopes:
             vault.write_note("02-trading-skills/evil.md", {}, "x", caller="trader")
 
     def test_trader_trade_notes_allowed(self, vault):
-        vault.write_note("04-trade-history/trades/t1.md", {"espn_event_id": "1"},
+        vault.write_note("04-trade-history/trades/t1.md", {"event_id": "1"},
                          "trade", caller="trader")
 
 
@@ -148,10 +149,10 @@ class TestCache:
 
 class TestAppend:
     def test_append_section(self, vault):
-        vault.write_note("03-market-context/active-games/mlb-1.md",
-                         {"espn_event_id": "1"}, "# Game\n", caller="game-monitor")
-        vault.append_section("03-market-context/active-games/mlb-1.md",
-                             "Signals", "- overreaction-candidate", caller="game-monitor")
-        note = vault.read_note("03-market-context/active-games/mlb-1.md")
-        assert "## Signals" in note.body and "overreaction-candidate" in note.body
-        assert note.frontmatter == {"espn_event_id": "1"}
+        vault.write_note("03-market-context/active-windows/w-1.md",
+                         {"event_id": "1"}, "# Window\n", caller="window-monitor")
+        vault.append_section("03-market-context/active-windows/w-1.md",
+                             "Signals", "- fair-value-candidate", caller="window-monitor")
+        note = vault.read_note("03-market-context/active-windows/w-1.md")
+        assert "## Signals" in note.body and "fair-value-candidate" in note.body
+        assert note.frontmatter == {"event_id": "1"}

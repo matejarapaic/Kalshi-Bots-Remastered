@@ -246,8 +246,8 @@ td.num, th.num { text-align: right; }
   <section class="card expo-card">
     <h2>Exposure by skill</h2>
     <div id="expo-skill"><div class="empty">No open exposure.</div></div>
-    <h2 style="margin-top:12px">Exposure by game</h2>
-    <div id="expo-game"><div class="empty">No open exposure.</div></div>
+    <h2 style="margin-top:12px">Exposure by event</h2>
+    <div id="expo-event"><div class="empty">No open exposure.</div></div>
   </section>
 
   <!-- Open trades: dense sortable-style table, sticky header -->
@@ -276,7 +276,7 @@ td.num, th.num { text-align: right; }
 <script>
 "use strict";
 /* Presentation layer only. Consumes the existing backend contract untouched:
-   GET /api/state  and  WS /ws (events carry sport/league/game_id/signal_type). */
+   GET /api/state  and  WS /ws (events carry series/event_id/signal_type). */
 
 const $ = (id) => document.getElementById(id);
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -328,7 +328,7 @@ async function refreshState() {
   $("kpi-pos").textContent = e.open_positions ?? "—";
 
   renderBars($("expo-skill"), e.by_skill || {});
-  renderBars($("expo-game"), e.by_game || {});
+  renderBars($("expo-event"), e.by_event || {});
   renderTrades(s.open_trades || []);
 
   const unrealized = s.unrealized_pnl_cents || 0;
@@ -369,15 +369,15 @@ function renderTrades(trades) {
 const seenEvents = new Set();
 function seedEvent(evt) { addFeed(evt, true); }
 function addFeed(evt, fromSeed) {
-  const key = evt.ts + "|" + evt.kind + "|" + (evt.game_id || "") + "|" + (evt.result || evt.signal_type || evt.n || "");
+  const key = evt.ts + "|" + evt.kind + "|" + (evt.event_id || "") + "|" + (evt.result || evt.signal_type || evt.n || "");
   if (seenEvents.has(key)) return;
   seenEvents.add(key);
   $("feed-empty").style.display = "none";
   const li = document.createElement("li");
   const t = evt.ts ? new Date(evt.ts).toLocaleTimeString([], { hour12: false }) : "";
   let detail = "";
-  if (evt.kind === "signal") detail = `${(evt.league || "").toUpperCase()} ${evt.game_id || ""} · ${evt.signal_type || ""}${evt.market_ticker ? " · " + evt.market_ticker : ""}`;
-  else if (evt.kind === "disposition") detail = `${(evt.league || "").toUpperCase()} ${evt.game_id || ""} · ${evt.signal_type || ""} → ${evt.result || ""}`;
+  if (evt.kind === "signal") detail = `${evt.series || ""} ${evt.event_id || ""} · ${evt.signal_type || ""}${evt.market_ticker ? " · " + evt.market_ticker : ""}`;
+  else if (evt.kind === "disposition") detail = `${evt.series || ""} ${evt.event_id || ""} · ${evt.signal_type || ""} → ${evt.result || ""}`;
   else if (evt.kind === "cycle") detail = `cycle ${evt.n} · ${evt.signals ?? 0} signals · ${(evt.finals || []).length} finals · ${(evt.exits || []).length} exits`;
   else detail = JSON.stringify(evt);
   li.innerHTML = `<time datetime="${evt.ts || ""}">${t}</time>` +

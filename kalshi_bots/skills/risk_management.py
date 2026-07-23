@@ -20,34 +20,37 @@ log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 # ---------------------------------------------------------------------------
-# THE PARAMETER TABLE. Statuses: CONFIRMED = owner-approved; changing one
-# requires owner sign-off by build rule.
+# THE PARAMETER TABLE. Statuses: CONFIRMED = owner-approved; PROPOSED = pivot
+# defaults awaiting owner sign-off. Changing a CONFIRMED value requires owner
+# sign-off by build rule.
 # ---------------------------------------------------------------------------
-# CONFIRMED 2026-07-17 (from the four confirmed skill notes)
+# CONFIRMED 2026-07-17 (carried over from the prior build; the half-Kelly
+# discipline is category-agnostic)
 BASE_KELLY_FRACTION = 0.5
-SKILL_RISK_MULTIPLIER = {          # (live, pregame)
-    "live-win-prob-overreaction": (1.0, 1.0),
-    "sportsbook-kalshi-divergence": (1.0, 0.5),
-    "injury-news-repricing-lag": (0.5, 0.5),
-    "garbage-time-mispricing": None,  # FLAT sizing; Kelly forbidden at p->1
+# PROPOSED 2026-07-22 (crypto pivot defaults; skills are draft-status until
+# postmortems accumulate 30+ settled samples — see 02-trading-skills notes)
+SKILL_RISK_MULTIPLIER = {          # (live, non_live); crypto trades 24/7 so
+    "btc-15min-fair-value": (1.0, 1.0),        # only the live column applies
+    "btc-15min-orderflow-imbalance": (1.0, 1.0),
+    "btc-15min-vol-spike": (0.5, 0.5),
 }
 PER_TRADE_CAP_PCT = {
-    "live-win-prob-overreaction": 5,
-    "sportsbook-kalshi-divergence": 5,
-    "injury-news-repricing-lag": 3,
-    "garbage-time-mispricing": 5,
+    "btc-15min-fair-value": 5,
+    "btc-15min-orderflow-imbalance": 5,
+    "btc-15min-vol-spike": 3,
 }
-GARBAGE_TIME_AGGREGATE_CAP_PCT = 10
 SKILL_MIN_DEPTH = {                # contracts within 2c of entry, per skill note
-    "live-win-prob-overreaction": 200,
-    "sportsbook-kalshi-divergence": 200,
-    "injury-news-repricing-lag": 100,
-    "garbage-time-mispricing": 300,
+    "btc-15min-fair-value": 100,
+    "btc-15min-orderflow-imbalance": 100,
+    "btc-15min-vol-spike": 100,
 }
-# CONFIRMED 2026-07-17 (Phase 2 checkpoint, "tighter variant")
+MAX_CONTRACTS_PER_WINDOW = 20      # PROPOSED: hard contract cap per 15-min
+                                   # window while skills are draft-calibrating
+# CONFIRMED 2026-07-17 (Phase 2 checkpoint, "tighter variant") — carried to
+# crypto as PROPOSED until the owner re-confirms them for this market family
 TOTAL_EXPOSURE_CAP_PCT = 15
-PER_GAME_EXPOSURE_CAP_PCT = 5
-CORRELATION_SCALE_SAME_GAME = 0.5
+PER_EVENT_EXPOSURE_CAP_PCT = 5
+CORRELATION_SCALE_SAME_EVENT = 0.5
 DAILY_LOSS_HALT_PCT = 5
 MAX_OPEN_POSITIONS = 6
 DEPTH_CONSUMPTION_MAX = 0.25
@@ -131,15 +134,17 @@ class RiskManager:
         return (self._position_cost()
                 + sum(i["cost_cents"] for i in self._intents.values()))
 
-    def _game_cost(self, espn_event_id: str, teams: set[str]) -> int:
+    def _event_cost(self, event_id: str, labels: set[str]) -> int:
+        """Exposure already committed to the same event (window), matched by
+        event id or overlapping market labels — the correlation basis."""
         total = 0
         for p in self._positions.values():
-            if p.get("espn_event_id") == espn_event_id or \
-                    (teams and teams & set(p.get("teams") or [])):
+            if p.get("event_id") == event_id or \
+                    (labels and labels & set(p.get("labels") or [])):
                 total += p["cost_cents"]
         for i in self._intents.values():
-            if i.get("espn_event_id") == espn_event_id or \
-                    (teams and teams & set(i.get("teams") or [])):
+            if i.get("event_id") == event_id or \
+                    (labels and labels & set(i.get("labels") or [])):
                 total += i["cost_cents"]
         return total
 
@@ -184,7 +189,7 @@ class RiskManager:
         # (2)+(3) raw fraction and skill multiplier
         mult = SKILL_RISK_MULTIPLIER[skill]
         kf_used = None
-        if mult is None:  # flat sizing (garbage-time)
+        if mult is None:  # flat sizing (no crypto skill uses it yet; mechanism kept)
             fraction = PER_TRADE_CAP_PCT[skill] / 100
         else:
             f_star = kelly_fraction(req.model_prob, c)
@@ -198,46 +203,40 @@ class RiskManager:
             fraction = cap
             capped_by.append("per_trade_cap")
 
-        # (5) correlation scaling
-        teams = {req.market.yes_team_kalshi_abbr}
-        eid = req.espn_event_id or req.signal.espn_event_id
-        if self._game_cost(eid, teams) > 0:
-            fraction *= CORRELATION_SCALE_SAME_GAME
-            capped_by.append("correlation_same_game")
+        # (5) correlation scaling (same window/event)
+        labels = {req.market.market_ticker}
+        eid = req.event_id or (req.signal.window.event_ticker
+                               if req.signal and req.signal.window else "")
+        if self._event_cost(eid, labels) > 0:
+            fraction *= CORRELATION_SCALE_SAME_EVENT
+            capped_by.append("correlation_same_event")
 
         budget = int(fraction * bankroll)
 
-        # (6) per-game cap
-        game_room = int(PER_GAME_EXPOSURE_CAP_PCT / 100 * bankroll) - self._game_cost(eid, teams)
-        if budget > game_room:
-            budget = max(0, game_room)
-            capped_by.append("per_game_cap")
+        # (6) per-event cap
+        event_room = int(PER_EVENT_EXPOSURE_CAP_PCT / 100 * bankroll) - self._event_cost(eid, labels)
+        if budget > event_room:
+            budget = max(0, event_room)
+            capped_by.append("per_event_cap")
 
-        # (7) skill-aggregate caps
-        if skill == "garbage-time-mispricing":
-            agg_room = int(GARBAGE_TIME_AGGREGATE_CAP_PCT / 100 * bankroll) - self._skill_cost(skill)
-            if budget > agg_room:
-                budget = max(0, agg_room)
-                capped_by.append("garbage_aggregate_cap")
-
-        # (8) total exposure cap
+        # (7) total exposure cap
         total_room = int(TOTAL_EXPOSURE_CAP_PCT / 100 * bankroll) - self._open_cost()
         if budget > total_room:
             budget = max(0, total_room)
             capped_by.append("total_exposure_cap")
 
-        # (9) daily-loss halt (incl. manual halt)
+        # (8) daily-loss halt (incl. manual halt)
         if self._halted:
             return zero("halted")
         if self._daily_halted(bankroll):
             return zero("daily_loss_halt")
 
-        # (10) max open positions
+        # (9) max open positions
         self._prune_intents()
         if len(self._positions) + len(self._intents) >= MAX_OPEN_POSITIONS:
             return zero("max_open_positions")
 
-        # (11) depth gate
+        # (10) depth gate
         if req.book_depth_at_entry < SKILL_MIN_DEPTH[skill]:
             return zero("depth_min")
         contracts = budget // c_f
@@ -246,14 +245,19 @@ class RiskManager:
             contracts = depth_cap
             capped_by.append("depth_gate")
 
+        # (11) per-window contract cap (draft-skill training wheels)
+        if contracts > MAX_CONTRACTS_PER_WINDOW:
+            contracts = MAX_CONTRACTS_PER_WINDOW
+            capped_by.append("per_window_contract_cap")
+
         # (12) integer floor
         if contracts < 1:
             return zero(capped_by[-1] if capped_by else "no_room")
 
         cost = contracts * c + est_fee_cents(contracts, c)
         self._intents[f"{req.market.market_ticker}|{skill}"] = {
-            "cost_cents": cost, "espn_event_id": eid, "skill": skill,
-            "teams": sorted(teams), "expires": time.monotonic() + INTENT_TTL_S,
+            "cost_cents": cost, "event_id": eid, "skill": skill,
+            "labels": sorted(labels), "expires": time.monotonic() + INTENT_TTL_S,
         }
         return SizingResult(contracts=int(contracts), limit_price=c,
                             kelly_fraction_used=kf_used, capped_by=capped_by,
@@ -264,13 +268,13 @@ class RiskManager:
             self._intents.pop(f"{market_ticker}|{skill}", None)
 
     def on_fill(self, fill: Fill, market: MarketRef, skill_name: str,
-                espn_event_id: str = "") -> None:
+                event_id: str = "") -> None:
         with self._lock:
             self._intents.pop(f"{market.market_ticker}|{skill_name}", None)
             p = self._positions.setdefault(market.market_ticker, {
                 "skill": skill_name, "side": fill.side, "contracts": 0,
-                "cost_cents": 0, "espn_event_id": espn_event_id,
-                "teams": [market.yes_team_kalshi_abbr],
+                "cost_cents": 0, "event_id": event_id,
+                "labels": [market.market_ticker],
                 "opened_at": fill.ts.isoformat(),
             })
             p["contracts"] += fill.contracts
@@ -310,16 +314,16 @@ class RiskManager:
                 balance = self.kalshi.get_balance()
             except Exception:
                 balance = 0
-            by_game: dict[str, int] = {}
+            by_event: dict[str, int] = {}
             by_skill: dict[str, int] = {}
             for p in self._positions.values():
-                by_game[p.get("espn_event_id", "?")] = \
-                    by_game.get(p.get("espn_event_id", "?"), 0) + p["cost_cents"]
+                by_event[p.get("event_id", "?")] = \
+                    by_event.get(p.get("event_id", "?"), 0) + p["cost_cents"]
                 by_skill[p["skill"]] = by_skill.get(p["skill"], 0) + p["cost_cents"]
             return ExposureSummary(
                 bankroll_cents=balance + self._position_cost(),
                 open_cost_cents=sum(p["cost_cents"] for p in self._positions.values()),
-                by_game=by_game, by_skill=by_skill,
+                by_event=by_event, by_skill=by_skill,
                 open_positions=len(self._positions),
                 daily_realized_pnl_cents=self._daily_pnl.get(self._et_today(), 0),
                 halted=self._halted, halt_reason=self._halt_reason)

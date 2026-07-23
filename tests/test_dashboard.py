@@ -11,7 +11,7 @@ class FakeRisk:
     def exposure(self):
         from kalshi_bots.types import ExposureSummary
         return ExposureSummary(bankroll_cents=10000, open_cost_cents=0,
-                               by_game={}, by_skill={}, open_positions=0,
+                               by_event={}, by_skill={}, open_positions=0,
                                daily_realized_pnl_cents=0, halted=False,
                                halt_reason=None)
 
@@ -30,7 +30,7 @@ class FakeOrchestrator:
 def client():
     orch = FakeOrchestrator()
     orch.events.append({"kind": "signal", "ts": "2026-07-17T20:00:00+00:00",
-                        "sport": "mlb", "league": "mlb", "game_id": "e1",
+                        "series": "KXBTC15M", "event_id": "e1",
                         "signal_type": "garbage-time-candidate",
                         "market_ticker": "T"})
     return TestClient(create_app(orch)), orch
@@ -50,7 +50,7 @@ def test_state_contract_shape(client):
     assert set(s.keys()) == {"env", "exposure", "unrealized_pnl_cents",
                              "unrealized_pnl_pct", "open_trades", "events"}
     evt = s["events"][-1]
-    assert {"sport", "league", "game_id", "signal_type"} <= set(evt.keys())
+    assert {"series", "event_id", "signal_type"} <= set(evt.keys())
 
 
 class FakeBroker:
@@ -71,15 +71,15 @@ def test_open_trades_mark_to_market_pnl():
 
     orch = FakeOrchestrator()
     orch.trader.broker = FakeBroker(yes_bid=55)  # entered at 49c, now 55c bid
-    market = MarketRef(league="mlb", series_ticker="KXMLBGAME",
-                       event_ticker="KXMLBGAME-26JUL171905LADNYY",
-                       market_ticker="KXMLBGAME-26JUL171905LADNYY-NYY",
-                       yes_team_kalshi_abbr="NYY", title="t", close_ts=None,
+    market = MarketRef(family="crypto", series_ticker="KXBTC15M",
+                       event_ticker="KXBTC15M-26JUL222130",
+                       market_ticker="KXBTC15M-26JUL222130-30",
+                       yes_label="up", title="t", close_ts=None,
                        settlement_notes=None)
     orch.trader.open_trades = {"kb-1": {
-        "market_ticker": market.market_ticker, "skill": "sportsbook-kalshi-divergence",
+        "market_ticker": market.market_ticker, "skill": "btc-15min-fair-value",
         "side": "yes", "contracts": 10, "entry_price": 49,
-        "espn_event_id": "e1", "league": "mlb", "market": market,
+        "event_id": "e1", "family": "crypto", "market": market,
     }}
     c = TestClient(create_app(orch))
     s = c.get("/api/state").json()

@@ -1,8 +1,14 @@
 """skill-matcher skill. Spec: skills/skill-matcher/SKILL.md.
 
 Deterministic, auditable matching of signals to confirmed trading skills.
-Hard gates (status/league/signal-type/tags) then a weighted score whose
+Hard gates (status/family/signal-type/tags) then a weighted score whose
 components decompose into reasons[]. No LLM calls, no vibes.
+
+Crypto pivot: signals are CryptoSignals; condition tags derive from the
+window phase and signal payload (previously per-event state). A skill note's
+`status` must be `confirmed` to ever match — draft/retired skills are
+structurally invisible here, which is the enforcement mechanism for
+"don't trade unconfirmed rules."
 """
 from __future__ import annotations
 
@@ -11,8 +17,7 @@ from datetime import datetime, timezone
 
 from kalshi_bots.skills.vault import Vault
 from kalshi_bots.types import (
-    CandidateSignal, ConsensusOdds, GameState, OrderbookSnapshot, SkillMatch,
-    VaultQuery,
+    CryptoSignal, OrderbookSnapshot, SkillMatch, VaultQuery,
 )
 
 log = logging.getLogger(__name__)
@@ -24,50 +29,27 @@ W_FRESH = 0.20
 W_HIST = 0.15
 LOW_SAMPLE = 20
 
-SIGNAL_SKILL_MAP = {
-    "overreaction-candidate": "live-win-prob-overreaction",
-    "divergence-candidate": "sportsbook-kalshi-divergence",
-    "injury-candidate": "injury-news-repricing-lag",
-    "garbage-time-candidate": "garbage-time-mispricing",
-}
-
-STALENESS_BOUND_S = {  # per skill note
-    "live-win-prob-overreaction": 90,
-    "sportsbook-kalshi-divergence": 60,
-    "injury-news-repricing-lag": 60,
-    "garbage-time-mispricing": 60,
-}
-
-BLOWOUT_MARGIN = {"nba": 15, "nfl": 17, "mlb": 5}
+# per skill note: worst acceptable input age at decision time (seconds)
+DEFAULT_STALENESS_BOUND_S = 10  # streaming inputs: seconds, not minutes
+HIGH_VOL_SIGMA = 1.0            # >=100% annualized tags high-volatility
 
 
 class SkillMatcherError(Exception):
     pass
 
 
-def derive_condition_tags(game: GameState, signal: CandidateSignal,
+def derive_condition_tags(signal: CryptoSignal,
                           now: datetime | None = None) -> list[str]:
-    now = now or datetime.now(timezone.utc)
-    tags = []
-    if game.status == "in_progress":
-        tags.append("live")
-    elif game.status == "scheduled" and (game.start_time - now).total_seconds() <= 3600:
-        tags.append("pregame")
-    if game.league in ("nfl", "nba"):
-        if game.period >= 4 and (game.clock_seconds or 9999) <= 300:
-            tags.append("endgame")
-    elif game.league == "mlb" and game.period >= 8:
-        tags.append("endgame")
-    if abs(game.home_score - game.away_score) >= BLOWOUT_MARGIN[game.league]:
-        tags.append("blowout")
-    swing = signal.payload.get("swing")
-    if swing is not None:
-        tags.append("momentum-swing")
-        magnitude = swing.get("magnitude") if isinstance(swing, dict) else swing.magnitude
-        if magnitude >= 0.10:
-            tags.append("high-volatility")
-    if signal.payload.get("injury") is not None:
-        tags.append("news-event")
+    """Tags the matcher intersects with a skill note's market_conditions.
+    Crypto is always live (24/7); the window phase is the main condition."""
+    tags = ["live"]
+    if signal.phase is not None:
+        tags.append(signal.phase)
+    sigma = signal.payload.get("sigma")
+    if isinstance(sigma, (int, float)) and sigma >= HIGH_VOL_SIGMA:
+        tags.append("high-volatility")
+    if signal.payload.get("thin_book"):
+        tags.append("thin-book")
     return tags
 
 
@@ -76,14 +58,12 @@ class SkillMatcher:
         self.vault = vault
         self._last_confirmed_count: int | None = None
 
-    def match(self, signal: CandidateSignal, game: GameState,
+    def match(self, signal: CryptoSignal,
               orderbook: OrderbookSnapshot | None = None,
-              consensus: ConsensusOdds | None = None,
               now: datetime | None = None) -> list[SkillMatch]:
         now = now or datetime.now(timezone.utc)
-        target_skill = SIGNAL_SKILL_MAP.get(signal.signal_type)
-        if target_skill is None:  # game-final etc. never matches trading skills
-            return []
+        if signal.signal_type in ("window-open", "window-close", "phase-change"):
+            return []  # lifecycle signals never match trading skills
 
         try:
             notes = self.vault.query(VaultQuery(
@@ -99,7 +79,7 @@ class SkillMatcher:
                       self._last_confirmed_count, len(notes))
         self._last_confirmed_count = len(notes)
 
-        derived = derive_condition_tags(game, signal, now)
+        derived = derive_condition_tags(signal, now)
         out: list[SkillMatch] = []
         for note in notes:
             fm = note.frontmatter
@@ -107,15 +87,14 @@ class SkillMatcher:
             reasons = []
 
             # hard gates
-            declared = fm.get("signal_types") or (
-                [signal.signal_type] if name == target_skill else [])
+            declared = fm.get("signal_types") or []
             if signal.signal_type not in declared:
                 continue
             reasons.append(f"gate:signal_type {signal.signal_type} -> {name}")
-            sports = fm.get("sports") or []
-            if "all" not in sports and game.league not in sports:
+            families = fm.get("families") or []
+            if "all" not in families and signal.series_ticker not in families:
                 continue
-            reasons.append(f"gate:league {game.league} in {sports}")
+            reasons.append(f"gate:family {signal.series_ticker} in {families}")
             conditions = fm.get("market_conditions") or []
             overlap = sorted(set(conditions) & set(derived))
             if not overlap:
@@ -131,12 +110,10 @@ class SkillMatcher:
             # scoring components
             s_signal = 1.0
             s_tags = len(overlap) / len(conditions) if conditions else 0.0
-            bound = STALENESS_BOUND_S.get(name, 60)
-            ages = [(now - game.fetched_at).total_seconds()]
+            bound = fm.get("staleness_bound_s") or DEFAULT_STALENESS_BOUND_S
+            ages = [(now - signal.emitted_at).total_seconds()]
             if orderbook is not None:
                 ages.append((now - orderbook.fetched_at).total_seconds())
-            if consensus is not None:
-                ages.append((now - consensus.fetched_at).total_seconds())
             worst = max(ages)
             if worst <= bound:
                 s_fresh = 1.0
@@ -159,7 +136,7 @@ class SkillMatcher:
                 f"s_signal=1.00 x {W_SIGNAL}",
                 f"s_tags={s_tags:.2f} ({len(overlap)}/{len(conditions)} tags: "
                 f"{', '.join(overlap)}) x {W_TAGS}",
-                f"s_fresh={s_fresh:.2f} (worst age {worst:.0f}s, bound {bound}s) x {W_FRESH}",
+                f"s_fresh={s_fresh:.2f} (worst age {worst:.1f}s, bound {bound}s) x {W_FRESH}",
                 f"s_hist={s_hist:.2f} (sample={sample}) x {W_HIST}",
             ]
             out.append(SkillMatch(skill_name=name, score=score,

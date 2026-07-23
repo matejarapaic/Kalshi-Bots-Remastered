@@ -28,7 +28,7 @@ from kalshi_bots.types import ApprovalOutcome, TradeCard
 log = logging.getLogger(__name__)
 
 APPROVAL_TIMEOUT_LIVE_S = 120     # owner-confirmed 2026-07-17
-APPROVAL_TIMEOUT_PREGAME_S = 600  # owner-confirmed 2026-07-17
+APPROVAL_TIMEOUT_NON_LIVE_S = 600  # owner-confirmed 2026-07-17
 QUEUE_MAX = 200
 
 
@@ -168,7 +168,7 @@ class DiscordBot:
                                    card_message_id=None)
 
         timeout_s = timeout_s if timeout_s is not None else (
-            APPROVAL_TIMEOUT_LIVE_S if card.is_live else APPROVAL_TIMEOUT_PREGAME_S)
+            APPROVAL_TIMEOUT_LIVE_S if card.is_live else APPROVAL_TIMEOUT_NON_LIVE_S)
         payload = {
             "kind": "trade_card", "client_order_id": card.client_order_id,
             "text": self._render_card(card), "droppable": False,
@@ -247,7 +247,7 @@ class DiscordBot:
             e = self.risk.exposure()
             lines = [f"open positions: {e.open_positions}, "
                      f"cost {e.open_cost_cents}c / bankroll {e.bankroll_cents}c"]
-            lines += [f"  {g}: {c}c" for g, c in e.by_game.items()]
+            lines += [f"  {g}: {c}c" for g, c in e.by_event.items()]
             return "\n".join(lines)
         if cmd == "pnl":
             e = self.risk.exposure()

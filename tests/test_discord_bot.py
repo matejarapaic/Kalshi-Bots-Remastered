@@ -93,8 +93,8 @@ def bot(tmp_path):
 
 
 def card(coid="c1", live=True):
-    m = MarketRef(league="mlb", series_ticker="S", event_ticker="E",
-                  market_ticker="E-NYY", yes_team_kalshi_abbr="NYY", title="",
+    m = MarketRef(family="crypto", series_ticker="S", event_ticker="E",
+                  market_ticker="E-30", yes_label="up", title="",
                   close_ts=None, settlement_notes=None)
     s = SizingResult(contracts=10, limit_price=60, kelly_fraction_used=0.05,
                      capped_by=[], est_fee_cents_total=17)

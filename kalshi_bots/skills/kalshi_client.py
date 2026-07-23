@@ -123,7 +123,7 @@ def build_snapshot(market: MarketRef, orderbook_raw: dict,
     )
 
 
-def _parse_market(raw: dict, league: str = "") -> MarketRef:
+def _parse_market(raw: dict, family: str = "") -> MarketRef:
     close_ts = None
     for key in ("expected_expiration_time", "close_time"):
         if raw.get(key):
@@ -131,11 +131,12 @@ def _parse_market(raw: dict, league: str = "") -> MarketRef:
             break
     ticker = raw.get("ticker", "")
     event_ticker = raw.get("event_ticker", "")
-    yes_abbr = ticker[len(event_ticker) + 1:] if ticker.startswith(event_ticker + "-") else ""
+    suffix = ticker[len(event_ticker) + 1:] if ticker.startswith(event_ticker + "-") else ""
     series = event_ticker.split("-")[0] if event_ticker else ""
     return MarketRef(
-        league=league, series_ticker=series, event_ticker=event_ticker,
-        market_ticker=ticker, yes_team_kalshi_abbr=yes_abbr,
+        family=family, series_ticker=series, event_ticker=event_ticker,
+        market_ticker=ticker,
+        yes_label=raw.get("yes_sub_title") or suffix,
         title=raw.get("title", ""),
         close_ts=close_ts, settlement_notes=raw.get("rules_secondary"),
     )
@@ -213,6 +214,20 @@ class KalshiClient:
             "KALSHI-ACCESS-SIGNATURE": self._sign(ts, method, sign_path),
         }
 
+    def ws_auth_headers(self, ws_path: str = "/trade-api/ws/v2") -> dict:
+        """Connect-time headers for the market-data WebSocket: the same
+        RSA-PSS scheme signed over `timestamp + "GET" + ws_path` (verified
+        against docs.kalshi.com quick-start, 2026-07-22). The WS connection
+        itself always requires auth — there is no public channel."""
+        if not (self._key_id and self._private_key):
+            raise KalshiAuthError("KALSHI_KEY_ID/KALSHI_KEY_PATH required for WS")
+        ts = str(int(time.time() * 1000))
+        return {
+            "KALSHI-ACCESS-KEY": self._key_id,
+            "KALSHI-ACCESS-TIMESTAMP": ts,
+            "KALSHI-ACCESS-SIGNATURE": self._sign(ts, "GET", ws_path),
+        }
+
     def _req(self, method: str, path: str, body: dict | None = None,
              auth_required: bool = False) -> dict:
         if auth_required and not (self._key_id and self._private_key):
@@ -242,12 +257,19 @@ class KalshiClient:
 
     # --- market data ---
 
-    def get_market(self, market_ticker: str, league: str = "") -> MarketRef:
+    def get_market(self, market_ticker: str, family: str = "") -> MarketRef:
         raw = self._req("GET", f"/markets/{market_ticker}")
-        return _parse_market(raw.get("market", raw), league)
+        return _parse_market(raw.get("market", raw), family)
+
+    def get_market_raw(self, market_ticker: str) -> dict:
+        """Full market object verbatim — for fields MarketRef doesn't carry
+        (floor_strike, status, open/close times). window-monitor's
+        verification path; never used for pricing (orderbook truth only)."""
+        raw = self._req("GET", f"/markets/{market_ticker}")
+        return raw.get("market", raw)
 
     def get_markets(self, series_ticker: str, status: str | None = "open",
-                    league: str = "") -> list[MarketRef]:
+                    family: str = "") -> list[MarketRef]:
         out, cursor = [], None
         while True:
             path = f"/markets?series_ticker={series_ticker}&limit=200"
@@ -256,7 +278,7 @@ class KalshiClient:
             if cursor:
                 path += f"&cursor={cursor}"
             raw = self._req("GET", path)
-            out.extend(_parse_market(m, league) for m in raw.get("markets", []))
+            out.extend(_parse_market(m, family) for m in raw.get("markets", []))
             cursor = raw.get("cursor")
             if not cursor or not raw.get("markets"):
                 return out

@@ -32,12 +32,15 @@ class PaperBroker:
 
     # --- market data: proxied to the real public API ---
 
-    def get_market(self, market_ticker: str, league: str = "") -> MarketRef:
-        return self.kalshi.get_market(market_ticker, league)
+    def get_market(self, market_ticker: str, family: str = "") -> MarketRef:
+        return self.kalshi.get_market(market_ticker, family)
 
     def get_markets(self, series_ticker: str, status: str | None = "open",
-                    league: str = "") -> list[MarketRef]:
-        return self.kalshi.get_markets(series_ticker, status, league)
+                    family: str = "") -> list[MarketRef]:
+        return self.kalshi.get_markets(series_ticker, status, family)
+
+    def get_market_raw(self, market_ticker: str) -> dict:
+        return self.kalshi.get_market_raw(market_ticker)
 
     def get_orderbook(self, market):
         return self.kalshi.get_orderbook(market)
@@ -59,7 +62,7 @@ class PaperBroker:
         return [s] if s else []
 
     def settle(self, market_ticker: str, result: str) -> None:
-        """Paper settlement (driven by the analyst from ESPN finals)."""
+        """Paper settlement (driven by the analyst from the window outcome)."""
         pos = self.positions.get(market_ticker)
         revenue = 0
         if pos and pos.contracts > 0:

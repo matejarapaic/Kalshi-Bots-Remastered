@@ -13,10 +13,11 @@ fair-value model → signal → size → trade → exit → postmortem. Later cr
 families (`KXETH15M`, …) are in-architecture but out of scope for the first
 pivot — nothing may hard-code BTC.
 
-> **Pivot status:** this repo is mid-pivot from the previous sports (NFL/NBA/MLB)
-> system. Sprint 0 (sports removal + scaffolding) is done. Until Sprint 2 lands,
-> `kalshi_bots.orchestrator` and the agents intentionally fail to import — they
-> still reference deleted sports modules. Each sprint commits as `sprint-N: …`.
+> **Pivot status:** sprints 0-2 are done — sports code removed, streaming
+> price feed + Kalshi WS order book + window monitor live, orchestrator on the
+> 1s streaming loop, suite green. Sprint 3 (fair-value model + trader entry
+> path) is next; the trader declines all candidates until it lands. Each
+> sprint commits as `sprint-N: …`.
 
 **The system is demo-only by design, enforced at multiple layers, not just by convention:**
 - `Orchestrator.__init__` refuses to start unless `KALSHI_ENV=demo`.

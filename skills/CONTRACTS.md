@@ -1,28 +1,33 @@
 # Shared Type Contract
 
 Every `SKILL.md` in this directory expresses its inputs and outputs in terms of the
-types below. Phase 3 implements these as Python dataclasses in a single shared
-module (`kalshi_bots/types.py`). A spec that needs a new type defines it in its own
-"New types" section using the same conventions; a spec may never redefine a type
-listed here.
+types below, implemented as Python dataclasses in a single shared module
+(`kalshi_bots/types.py`) — the two files must stay in sync. A spec that needs a new
+type defines it in its own "New types" section using the same conventions; a spec
+may never redefine a type listed here.
 
 ## Global conventions
 
 - **Probabilities** are `float` in `[0.0, 1.0]`. Never percentages, never cents.
-- **Prices** are integer cents `1–99` (`Cents = int`). Conversion between price and
-  probability happens ONLY in `kalshi-client` (de-vig). <!-- TODO(sprint-2): was
-  "and odds-api (odds math)" — odds-api deleted in the crypto pivot. -->
-- **Timestamps** are timezone-aware UTC `datetime`. Every externally-fetched datum
-  carries `fetched_at` (when we polled) and, where the source provides one,
-  `source_ts` (the source's own timestamp). Staleness checks always use `fetched_at`.
+- **Kalshi contract prices** are integer cents `1–99` (`Cents = int`). Conversion
+  between price and probability happens ONLY in `kalshi-client` (de-vig).
+  Sub-cent reality: the crypto series use `tapered_deci_cent` tick structure
+  ($0.001 steps below $0.10 / above $0.90) and fractional contract counts;
+  `kalshi-client` aggregates to whole cents at the boundary (sizes floor, never
+  round up; our order prices are whole cents — valid ticks in every band). This
+  is a documented approximation, revisit if tail-price P&L precision starts to
+  matter.
+- **Crypto spot prices** (BTC/USD, strikes, BRTI values) are `float` dollars —
+  market data, not ledger money.
 - **Money** is integer cents (`bankroll_cents: int`), never floats.
+- **Timestamps** are timezone-aware UTC `datetime`. Every externally-fetched datum
+  carries `fetched_at`/`computed_at` (our clock) and, where the source provides
+  one, `source_ts`. Staleness checks always use our clock (monotonic where the
+  consumer allows it).
 - **Errors**: each skill raises its own typed exceptions (`KalshiClientError`,
-  `VaultError`, …) — no bare exceptions cross a skill boundary. Every skill's spec
-  lists its exception types.
-<!-- TODO(sprint-2): remove after types.py rewrite — sports-era convention
-- **League IDs**: `LeagueId = Literal["nfl", "nba", "mlb"]` — matches
-  `league-config.md` keys.
--->
+  `VaultError`, `CryptoPriceFeedError`, …) — no bare exceptions cross a skill
+  boundary. Data problems never raise on the read path: they degrade `health()`
+  and gate reads to `None` (fail closed).
 
 ## Core types
 
@@ -30,63 +35,21 @@ listed here.
 Prob = float          # 0.0–1.0
 Cents = int           # 1–99
 Side = Literal["yes", "no"]
-
-# TODO(sprint-2): remove after types.py rewrite — sports-specific types below
-# are retired by the crypto pivot. Kept commented (not deleted) until Sprint 2
-# rewrites types.py so nothing silently depends on them in the interim.
-#
-# LeagueId = Literal["nfl", "nba", "mlb"]
-# GameStatus = Literal["scheduled", "in_progress", "final", "postponed", "suspended"]
-# InjuryStatus = Literal["OUT", "DOUBTFUL", "QUESTIONABLE", "PROBABLE", "DAY_TO_DAY", "ACTIVE"]
-#
-# @dataclass
-# class TeamRef:
-#     league: LeagueId
-#     espn_abbr: str          # authoritative key into league-config alias map
-#     kalshi_abbr: str | None # None until verified against a live ticker
-#     display_name: str
-#
-# @dataclass
-# class GameState:
-#     league: LeagueId
-#     espn_event_id: str
-#     status: GameStatus
-#     home: TeamRef
-#     away: TeamRef
-#     home_score: int
-#     away_score: int
-#     period: int                    # quarter / inning number; 0 if not started
-#     period_half: Literal["top", "bottom"] | None  # MLB only, else None
-#     clock_seconds: int | None      # NFL/NBA game clock; None for MLB
-#     win_prob_home: Prob | None     # ESPN model; None if feed absent
-#     win_prob_source_ts: datetime | None
-#     start_time: datetime
-#     fetched_at: datetime
-#
-# @dataclass
-# class InjuryEvent:
-#     league: LeagueId
-#     team: TeamRef
-#     espn_event_id: str | None   # None for pregame/team-level news
-#     player_id: str
-#     player_name: str
-#     position: str
-#     status: InjuryStatus
-#     source_ts: datetime | None
-#     fetched_at: datetime
+Phase = Literal["opening", "midpoint", "near_close", "settled"]
+SignalType = Literal[
+    "window-open", "phase-change", "fair-value-candidate", "window-close",
+]
 
 @dataclass
 class MarketRef:
-    # TODO(sprint-2): rework — drop `league`/`yes_team_kalshi_abbr`, key on
-    # series/event/market tickers only (crypto windows have no teams).
-    league: LeagueId
-    series_ticker: str          # e.g. KXBTC15M (verify at runtime)
+    family: str                 # market family/category label, e.g. "crypto"
+    series_ticker: str          # e.g. KXBTC15M (grammar verified at runtime)
     event_ticker: str
     market_ticker: str
-    yes_team_kalshi_abbr: str   # which team YES resolves for
+    yes_label: str              # what YES resolves for (subtitle / ticker suffix)
     title: str
     close_ts: datetime | None
-    settlement_notes: str | None  # populated when terms were checked
+    settlement_notes: str | None
 
 @dataclass
 class DepthLevel:
@@ -95,62 +58,99 @@ class DepthLevel:
 
 @dataclass
 class OrderbookSnapshot:
+    # THE book snapshot type — built by kalshi-client's build_snapshot from
+    # either transport (REST fetch or the WS client's live ladder). Books are
+    # one-sided bids per side; asks derived as 100 - other side's bid.
     market: MarketRef
     yes_bid: Cents | None
-    yes_ask: Cents | None       # DERIVED as 100 - no_bid when YES ask side empty
+    yes_ask: Cents | None       # DERIVED as 100 - no_bid
     no_bid: Cents | None
     no_ask: Cents | None
-    yes_book: list[DepthLevel]  # asks available to a YES buyer (derived from NO bids too)
+    yes_book: list[DepthLevel]  # asks available to a YES buyer
     no_book: list[DepthLevel]
     devigged_yes_prob: Prob | None  # None when book too empty to de-vig
     spread_cents: int | None
     fetched_at: datetime
 
-# TODO(sprint-2): remove after types.py rewrite — sports-specific types below.
-#
-# @dataclass
-# class BookQuote:
-#     book_name: str
-#     home_prob: Prob             # de-vigged, this book alone
-#     fetched_at: datetime
-#     source_ts: datetime | None
-#
-# @dataclass
-# class ConsensusOdds:
-#     league: LeagueId
-#     home: TeamRef
-#     away: TeamRef
-#     espn_event_id: str | None   # set once league-matching has resolved it
-#     book_count: int
-#     devigged_home_prob: Prob    # consensus (mean of de-vigged book probs)
-#     max_pairwise_disagreement: float  # max |prob_i - prob_j| across books
-#     books: list[BookQuote]
-#     fetched_at: datetime
-#
-# @dataclass
-# class MatchResult:
-#     espn_event_id: str
-#     market: MarketRef | None    # None = no unambiguous match; NEVER a guess
-#     method: Literal["alias_exact", "alias_plus_start_time", "none"]
-#     ambiguous: bool             # True when >1 candidate survived tie-breaking
-#     candidates_considered: int
-#
-# SignalType = Literal[
-#     "overreaction-candidate", "divergence-candidate",
-#     "injury-candidate", "garbage-time-candidate", "game-final",
-# ]
-#
-# @dataclass
-# class CandidateSignal:
-#     signal_type: SignalType
-#     league: LeagueId
-#     espn_event_id: str
-#     market_ticker: str | None
-#     payload: dict               # per-type shape documented in espn-data / skill specs
-#     emitted_at: datetime
-#
-# TODO(sprint-2): CandidateSignal is replaced by CryptoSignal; SizingRequest's
-# `signal` field re-types accordingly in the same rewrite.
+@dataclass
+class WindowRef:
+    # One 15-minute contract window. strike is None until the window opens
+    # (Kalshi stamps floor_strike at open with the prior settlement value).
+    series_ticker: str
+    event_ticker: str
+    market_ticker: str
+    opens_at: datetime
+    closes_at: datetime
+    strike: float | None = None
+
+@dataclass
+class CryptoSignal:
+    # window-monitor output. A signal is a flag, never a vouch — the trader
+    # re-verifies everything against fresh data at decision time.
+    signal_type: SignalType
+    series_ticker: str
+    market_ticker: str | None
+    window: WindowRef | None
+    phase: Phase | None
+    payload: dict               # per-type shape documented in window-monitor
+    emitted_at: datetime
+
+@dataclass
+class FairValueEstimate:
+    model_prob_up: Prob
+    model_prob_down: Prob
+    market_ask_cents: Cents | None   # best ask for the "up" (YES) side
+    edge_cents: float | None         # model - market, signed; None if no ask
+    sigma_used: float                # annualized realized vol input
+    spot_used: float
+    strike: float
+    time_remaining_s: float
+    computed_at: datetime
+
+@dataclass
+class BookHealth:
+    market_ticker: str
+    connected: bool
+    subscribed: bool
+    last_update_age_s: float | None
+    seq_gap: bool
+    healthy: bool
+
+@dataclass
+class BrtiState:
+    # Latest cfbenchmarks_value tick for BRTI (the settlement index itself).
+    # settlement_forming = Kalshi's last_60s_windowed_average_15min, present
+    # only in each window's final minute, computed with settlement windowing.
+    value: float | None
+    avg_60s: float | None
+    settlement_forming: float | None
+    ts: datetime | None
+    fetched_at: datetime
+    raw: dict
+
+@dataclass
+class CompositeSpot:
+    mid: float                      # weighted median of healthy constituents' mids
+    bid: float
+    ask: float
+    source_ts: dict[str, datetime]  # per-exchange source tick timestamps
+    computed_at: datetime
+    constituents_healthy: int
+    constituent_count: int
+
+@dataclass
+class ConstituentHealth:
+    name: str
+    connected: bool
+    last_tick_age_s: float | None   # None = never ticked since start
+    healthy: bool
+
+@dataclass
+class FeedHealth:
+    constituents: list[ConstituentHealth]
+    healthy_count: int
+    constituent_count: int
+    composite_available: bool
 
 @dataclass
 class SkillMatch:
@@ -168,15 +168,28 @@ class SizingRequest:
     entry_price: Cents
     model_prob: Prob            # our estimate of P(side wins)
     book_depth_at_entry: int    # contracts within the skill's depth window
-    signal: CandidateSignal
+    signal: CryptoSignal
+    event_id: str = ""          # correlation key (event ticker)
+    is_live: bool = True        # 24/7 crypto: effectively always True
 
 @dataclass
 class SizingResult:
     contracts: int              # 0 is a valid, final answer
     limit_price: Cents
     kelly_fraction_used: float | None   # None for flat-sized skills
-    capped_by: list[str]        # names of every cap that bound, e.g. ["per_trade_cap"]
+    capped_by: list[str]        # names of every cap that bound
     est_fee_cents_total: int
+
+@dataclass
+class ExposureSummary:
+    bankroll_cents: int
+    open_cost_cents: int
+    by_event: dict[str, int]
+    by_skill: dict[str, int]
+    open_positions: int
+    daily_realized_pnl_cents: int
+    halted: bool
+    halt_reason: str | None
 
 @dataclass
 class OrderRequest:
@@ -196,33 +209,34 @@ class OrderResult:
     fee_cents: int
     raw: dict                   # full API response for the trade note
 
-# --- crypto-price-feed types (sprint-1) ---
-# BTC spot prices are float dollars (market data, not ledger money — the
-# integer-cents rule applies to Kalshi contract prices and bankroll only).
+@dataclass
+class Position:
+    market_ticker: str
+    side: Side
+    contracts: int
+    avg_price: Cents
+    fees_paid_cents: int
+    raw: dict
 
 @dataclass
-class CompositeSpot:
-    mid: float                      # weighted median of healthy constituents' mids
-    bid: float                      # median constituent bid (same health filter)
-    ask: float
-    source_ts: dict[str, datetime]  # per-exchange: source's own tick timestamp
-    computed_at: datetime           # when the composite was computed (UTC)
-    constituents_healthy: int
-    constituent_count: int
+class Fill:
+    order_id: str
+    market_ticker: str
+    side: Side
+    action: str
+    contracts: int
+    price: Cents
+    taker_fee_cents: int
+    ts: datetime
+    raw: dict
 
 @dataclass
-class ConstituentHealth:
-    name: str
-    connected: bool                 # WS session currently open
-    last_tick_age_s: float | None   # None = never ticked since start
-    healthy: bool                   # connected AND last tick <= STALE_CONSTITUENT_S
-
-@dataclass
-class FeedHealth:
-    constituents: list[ConstituentHealth]
-    healthy_count: int
-    constituent_count: int
-    composite_available: bool       # healthy_count >= MIN_HEALTHY_CONSTITUENTS
+class Settlement:
+    market_ticker: str
+    result: Literal["yes", "no", "void"]
+    settled_ts: datetime | None
+    revenue_cents: int
+    raw: dict
 
 @dataclass
 class VaultNote:
@@ -235,22 +249,61 @@ class VaultNote:
 class VaultQuery:
     directory: str                       # vault-relative prefix
     frontmatter_filters: dict            # exact-match, e.g. {"status": "confirmed"}
-    tag_filters: list[str]               # matches list-membership, e.g. market_conditions
+    tag_filters: list[str]               # list-membership, e.g. market_conditions
+
+@dataclass
+class TradeCard:
+    client_order_id: str
+    skill_name: str
+    market: MarketRef
+    side: Side
+    action: Literal["buy", "sell"]
+    sizing: SizingResult
+    snapshot: dict
+    is_live: bool
+
+@dataclass
+class ApprovalOutcome:
+    decision: Literal["approved", "rejected", "expired", "undeliverable"]
+    decided_by: str | None
+    decided_at: datetime | None
+    card_message_id: str | None
+
+@dataclass
+class PostmortemReport:
+    # shape adapted fully in sprint-4 (batching, crypto counterfactuals)
+    family: str                 # series ticker, e.g. KXBTC15M
+    event_id: str               # event ticker of the audited window
+    trades_audited: int
+    entry_violations: int
+    exit_deviations: int
+    declined_candidates: int
+    counterfactual_pnl_cents: int
+    realized_pnl_cents: int
+    settlement_status: Literal["settled", "pending", "voided", "mismatch"]
+    threshold_flags: list[str]
+    note_path: str
 ```
 
 ## Cross-cutting rules restated (specs must not contradict these)
 
-1. Orderbook truth only: prices come from the orderbook endpoint; Kalshi summary
-   fields (`yes_ask` etc. on the market object) are frequently null/stale — never
-   read them for trading decisions.
+1. Orderbook truth only: prices come from the orderbook (REST endpoint or WS
+   ladder); Kalshi summary fields (`yes_ask` etc. on the market object) are
+   frequently null/stale — never read them for trading decisions.
 2. `best_yes_ask = 100 - best_no_bid` when the YES ask side is empty (and
    symmetrically for NO). The derivation lives in `kalshi-client` only.
 3. No skill reads vault files from disk on a live trading cycle — all vault access
    through the `vault` skill's TTL cache.
-4. Ambiguity → `None`, never a guess: window-monitor (formerly league-matching),
-   and any skill consuming it, must treat an unresolved active window as "do not
-   trade right now."
+4. Ambiguity → `None`, never a guess: window-monitor, and any skill consuming it,
+   must treat an unresolved active window as "do not trade right now."
 5. Every numeric trading parameter lives in `risk-management`'s named parameter
    table or a skill note's frontmatter — never inline in another skill's logic.
-6. All trading on `KALSHI_ENV=demo` until the Phase 3 final checkpoint explicitly
-   changes it.
+6. All trading on `KALSHI_ENV=demo` until the sprint-5 live-trading guard flow is
+   explicitly exercised by a human against a `confirmed`-status skill.
+7. Settlement source is BRTI (composite/`cfbenchmarks_value`), not any single
+   exchange; model inputs and postmortem checks reference it.
+8. Fail-closed everywhere: stale feed, unhealthy constituent count, seq gap,
+   missing WS — reads return `None` and the trader declines. Never a degraded
+   silent read.
+9. 24/7 memory hygiene: every deque, cache, and rolling buffer has a documented
+   bound.

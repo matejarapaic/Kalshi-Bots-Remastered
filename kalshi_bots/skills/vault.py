@@ -55,7 +55,7 @@ WRITE_SCOPES: dict[str, dict] = {
         "04-trade-history": None,
     },
     "trader": {"03-market-context": None, "04-trade-history": None},
-    "game-monitor": {"03-market-context": None},
+    "window-monitor": {"03-market-context": None},
     "orchestrator": {"03-market-context": None},
     "discord": {"03-market-context": None},
     "human": "*",
@@ -63,8 +63,9 @@ WRITE_SCOPES: dict[str, dict] = {
     "system": "*",
 }
 
-SKILL_TEMPLATE_FIELDS = {"skill", "sports", "market_conditions", "confidence_threshold",
-                         "risk_profile", "win_rate", "sample_size", "status", "last_updated"}
+SKILL_TEMPLATE_FIELDS = {"skill", "families", "signal_types", "market_conditions",
+                         "confidence_threshold", "risk_profile", "win_rate",
+                         "sample_size", "status", "last_updated"}
 VALID_SKILL_STATUS = {"draft", "confirmed", "retired"}
 VALID_RISK_PROFILES = {"low", "medium", "high"}
 
@@ -234,8 +235,8 @@ class Vault:
                 continue
             if q.tag_filters:
                 conditions = fm.get("market_conditions") or []
-                sports = fm.get("sports") or []
-                pool = set(conditions) | set(sports)
+                families = fm.get("families") or []
+                pool = set(conditions) | set(families)
                 if not any(t in pool for t in q.tag_filters):
                     continue
             out.append(note)

@@ -1,9 +1,9 @@
 """FastAPI + WebSocket dashboard.
 
-Data contract note (Category A, flagged): the master plan said to reuse the
-old bot's data contract, but no old-bot code exists on disk — this is a fresh
-minimal contract carrying the mandated extension fields on every event:
-`sport`, `league`, `game_id`, `signal_type`.
+Data contract note: minimal event contract; every event carries `kind`,
+`ts`, and event-specific fields (`series`, `event_id`, `signal_type`, ...).
+Full crypto state shape (active window, feed health, model-vs-market) lands
+in sprint-5.
 
 Endpoints:
   GET /api/state  -> exposure summary, open trades, recent events
@@ -52,8 +52,8 @@ def create_app(orchestrator):
             if current_price is not None:
                 unrealized_cents += t["contracts"] * (current_price - t["entry_price"])
             trades.append({
-                "sport": t["league"], "league": t["league"],
-                "game_id": t["espn_event_id"], "signal_type": None,
+                "family": t.get("family"), "event_id": t.get("event_id"),
+                "signal_type": None,
                 "skill": t["skill"], "market_ticker": t["market_ticker"],
                 "side": t["side"], "contracts": t["contracts"],
                 "entry_price_cents": t["entry_price"],

@@ -1,11 +1,10 @@
 """Human-facing time formatting for vault notes.
 
-Every league in this system plays on Eastern time (ticker grammar embeds ET
-start times too — see league_matching.py); notes meant for a human to read
-(daily slates, active-game state) show times in ET, 12-hour clock, not UTC
-military time. Machine-consumed timestamps (signal log JSON, frontmatter
-`updated`/`fetched_at` fields) stay ISO-8601 UTC — only display strings use
-this.
+Kalshi's ticker grammar embeds window close times in Eastern wall-clock (see
+skills/window_monitor.py), so notes meant for a human to read (active-window
+state, trade history) show times in ET, 12-hour clock, not UTC military time.
+Machine-consumed timestamps (signal log JSON, frontmatter `updated`/
+`fetched_at` fields) stay ISO-8601 UTC — only display strings use this.
 """
 from __future__ import annotations
 

@@ -1,40 +1,50 @@
 """Orchestrator. Prompt: vault 00-meta/orchestrator-system-prompt.md.
 
-Wires the three agents and runs the polling loop. Scheduling policy comes from
-league-config's ramp rules; this build implements the live-game cadence and a
-bounded run mode for paper cycles. KALSHI_ENV=demo is asserted at startup.
+Wires the three agents and runs the streaming loop. KALSHI_ENV=demo is
+asserted at startup.
+
+Streaming shape (crypto pivot): the exchange composite feed and the Kalshi
+market-data WebSocket run as background asyncio tasks that keep in-memory
+state current continuously; the main loop is a 1-second evaluation cadence
+over that state — no HTTP polling on the hot path. (Design note: the loop
+evaluates once per second rather than waking per WS message because every
+entry/exit rule in this system gates on window phase and second-scale
+staleness bounds, not on individual ticks; sub-second reaction adds
+complexity with no consumer.)
+
+24/7 operation: no off-season, no schedule, no daily slate. The window
+monitor resolves the active 15-minute contract straight from the clock and
+verifies it against the API every window.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import time
 from dataclasses import asdict, is_dataclass
-from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from kalshi_bots.agents.analyst import Analyst
-from kalshi_bots.agents.game_monitor import GameMonitor
 from kalshi_bots.agents.trader import Trader
+from kalshi_bots.agents.window_monitor import WindowMonitor
 from kalshi_bots.env import load_env
 from kalshi_bots.paper import PaperBroker
+from kalshi_bots.skills.crypto_price_feed import CryptoPriceFeed
 from kalshi_bots.skills.discord_bot import ConsoleTransport, DiscordBot, DiscordTransport
-from kalshi_bots.skills.espn_data import EspnData
 from kalshi_bots.skills.kalshi_client import KalshiClient
-from kalshi_bots.skills.league_matching import LeagueMatcher
-from kalshi_bots.skills.odds_api import OddsApi
+from kalshi_bots.skills.kalshi_ws_orderbook import KalshiOrderBook
 from kalshi_bots.skills.risk_management import RiskManager
 from kalshi_bots.skills.vault import Vault
+from kalshi_bots.skills.window_monitor import WindowResolver
 
 load_env()
 log = logging.getLogger(__name__)
-ET = ZoneInfo("America/New_York")
 
-LIVE_POLL_S = 20  # league-config ramp: live cadence
+TICK_S = 1.0  # evaluation cadence over streaming state
 
 
 class Orchestrator:
-    def __init__(self, leagues: list[str] | None = None,
+    def __init__(self, series: str = "KXBTC15M",
                  paper: bool | None = None, vault: Vault | None = None):
         """paper=None auto-detects: real demo-exchange execution if
         KALSHI_KEY_ID/KALSHI_KEY_PATH authenticate successfully, else falls
@@ -43,7 +53,9 @@ class Orchestrator:
         env = os.environ.get("KALSHI_ENV", "demo")
         if env != "demo":
             raise RuntimeError("orchestrator refuses to start: KALSHI_ENV must be "
-                               "demo until the Phase 3 final checkpoint")
+                               "demo until the live-trading guard flow (sprint-5) "
+                               "is explicitly exercised by a human")
+        self.series = series
         self.vault = vault or Vault()
         self.kalshi = KalshiClient()
         if paper is None:
@@ -56,12 +68,8 @@ class Orchestrator:
                 paper = True
                 log.warning("Kalshi demo auth unavailable (%s) — falling back "
                            "to PaperBroker simulation", e)
+        self.paper = paper
         self.broker = PaperBroker(self.kalshi) if paper else self.kalshi
-        self.espn = EspnData(self.vault)
-        self.matcher = LeagueMatcher(self.vault, self.kalshi)
-        # odds-api is optional: divergence/injury skills stay dormant (no
-        # candidates emitted) without a key, rather than failing startup.
-        self.odds = OddsApi(self.vault) if os.environ.get("ODDS_API_KEY") else None
         self.risk = RiskManager(self.vault, self.broker)
         try:
             self.risk.reconcile()
@@ -101,9 +109,24 @@ class Orchestrator:
                 log.warning("Discord gateway failed to connect (%s) — falling "
                            "back to REST-only transport", e)
                 self.discord.transport = DiscordTransport(discord_token, discord_channel)
-        self.monitor = GameMonitor(self.vault, self.espn, self.matcher,
-                                   kalshi=self.kalshi, odds=self.odds)
-        self.trader = Trader(self.vault, self.broker, self.matcher, self.risk,
+
+        # Streaming clients. The exchange composite always runs; the Kalshi WS
+        # requires auth (there is no public channel), so paper mode without
+        # credentials degrades to REST orderbook reads inside the trader —
+        # fail-closed, never a fabricated stream.
+        self.feed = CryptoPriceFeed()
+        self.book: KalshiOrderBook | None = None
+        try:
+            self.kalshi.ws_auth_headers()
+            self.book = KalshiOrderBook(self.kalshi)
+        except Exception as e:
+            log.warning("Kalshi WS unavailable (%s) — order books via REST "
+                       "on demand", e)
+
+        self.resolver = WindowResolver(self.kalshi, series=series)
+        self.monitor = WindowMonitor(self.vault, self.resolver,
+                                     book=self.book, feed=self.feed)
+        self.trader = Trader(self.vault, self.broker, self.risk,
                              self.discord, env="demo")
         try:
             counts = self.trader.reload_open_trades(self.risk.last_reconcile_settled)
@@ -113,11 +136,10 @@ class Orchestrator:
                          counts["restored"], counts["closed"])
         except Exception as e:
             log.warning("open-trade reload skipped: %s", e)
-        self.analyst = Analyst(self.vault, self.broker, self.espn,
-                               discord=self.discord, env="demo",
+        self.analyst = Analyst(self.vault, self.broker, discord=self.discord,
+                               env="demo",
                                paper_broker=self.broker if paper else None)
-        self.leagues = leagues or ["mlb"]
-        self.events: list[dict] = []   # dashboard feed
+        self.events: list[dict] = []   # dashboard feed (bounded below)
 
     def _emit(self, kind: str, **data):
         for k, v in list(data.items()):
@@ -128,57 +150,68 @@ class Orchestrator:
         del self.events[:-500]
         log.info("%s %s", kind, {k: v for k, v in data.items() if k != "raw"})
 
-    def run_cycle(self, day: date | None = None) -> dict:
-        """One full poll->signal->trade->exit pass across all leagues."""
-        day = day or datetime.now(timezone.utc).astimezone(ET).date()
-        summary = {"signals": 0, "dispositions": [], "exits": [], "finals": []}
-        for league in self.leagues:
-            signals = self.monitor.poll_cycle(league, day)
-            games = {}
-            try:
-                games = {g.espn_event_id: g
-                         for g in self.espn.get_scoreboard(league)}
-            except Exception as e:
-                log.error("scoreboard refetch failed: %s", e)
-            for sig in signals:
-                summary["signals"] += 1
-                self._emit("signal", league=sig.league, sport=sig.league,
-                           game_id=sig.espn_event_id,
-                           signal_type=sig.signal_type,
-                           market_ticker=sig.market_ticker)
-                if sig.signal_type == "game-final":
-                    summary["finals"].append(sig.espn_event_id)
-                    try:
-                        self.analyst.on_game_final(league, sig.espn_event_id)
-                    except Exception as e:
-                        log.error("postmortem failed: %s", e)
-                    continue
-                game = games.get(sig.espn_event_id)
-                if game is None:
-                    continue
-                disposition = self.trader.handle_signal(sig, game)
+    async def run_tick(self, now: datetime | None = None) -> dict:
+        """One evaluation pass over streaming state."""
+        now = now or datetime.now(timezone.utc)
+        summary = {"signals": 0, "dispositions": [], "exits": [], "closes": []}
+        try:
+            signals = await self.monitor.tick(now)
+        except Exception as e:
+            log.error("monitor tick failed: %s", e)
+            return summary
+        for sig in signals:
+            summary["signals"] += 1
+            self._emit("signal", series=sig.series_ticker,
+                       event_id=sig.window.event_ticker if sig.window else None,
+                       signal_type=sig.signal_type, phase=sig.phase,
+                       market_ticker=sig.market_ticker)
+            if sig.signal_type == "window-close":
+                summary["closes"].append(sig.market_ticker)
+                try:
+                    self.analyst.on_window_close(sig.window)
+                except Exception as e:
+                    log.error("postmortem failed: %s", e)
+                continue
+            if sig.signal_type == "fair-value-candidate":
+                try:
+                    disposition = self.trader.handle_signal(sig)
+                except Exception as e:
+                    log.error("trader signal handling failed: %s", e)
+                    disposition = f"declined:handler_error({e})"
                 summary["dispositions"].append(
-                    {"signal": sig.signal_type, "game_id": sig.espn_event_id,
-                     "result": disposition})
-                self._emit("disposition", league=league, sport=league,
-                           game_id=sig.espn_event_id,
+                    {"signal": sig.signal_type,
+                     "market_ticker": sig.market_ticker, "result": disposition})
+                self._emit("disposition", series=sig.series_ticker,
+                           market_ticker=sig.market_ticker,
                            signal_type=sig.signal_type, result=disposition)
-            summary["exits"].extend(self.trader.manage_positions(games))
+        try:
+            summary["exits"].extend(self.trader.manage_positions(now))
+        except Exception as e:
+            log.error("exit sweep failed: %s", e)
         self.discord.flush()
         return summary
 
-    def run(self, cycles: int | None = None, poll_s: int = LIVE_POLL_S):
-        """Bounded (paper) or unbounded run loop."""
-        day = datetime.now(timezone.utc).astimezone(ET).date()
-        for league in self.leagues:
-            self.monitor.build_slate(league, day)
-        n = 0
-        while cycles is None or n < cycles:
-            started = time.monotonic()
-            summary = self.run_cycle(day)
-            self._emit("cycle", n=n, **{k: v for k, v in summary.items()
-                                        if k != "dispositions"})
-            n += 1
-            if cycles is not None and n >= cycles:
-                return summary
-            time.sleep(max(0, poll_s - (time.monotonic() - started)))
+    async def _run_async(self, cycles: int | None = None, tick_s: float = TICK_S):
+        await self.feed.start()
+        if self.book is not None:
+            await self.book.start()
+        try:
+            n = 0
+            while cycles is None or n < cycles:
+                await asyncio.sleep(tick_s)
+                summary = await self.run_tick()
+                if summary["signals"] or summary["exits"]:
+                    self._emit("cycle", n=n,
+                               **{k: v for k, v in summary.items()
+                                  if k != "dispositions"})
+                n += 1
+            return summary
+        finally:
+            if self.book is not None:
+                await self.book.stop()
+            await self.feed.stop()
+
+    def run(self, cycles: int | None = None, poll_s: float | None = None):
+        """Bounded (smoke) or unbounded run loop. `poll_s` is honored as the
+        tick cadence for signature compatibility with the old poll loop."""
+        return asyncio.run(self._run_async(cycles, tick_s=poll_s or TICK_S))
