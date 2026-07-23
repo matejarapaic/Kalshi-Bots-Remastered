@@ -19,7 +19,7 @@ resolve_card(client_order_id: str, decision: str, user: str, authorized: bool) -
 flush() -> None            # deliver queued messages; requeue on failure; called every orchestrator cycle
 expire_all_pending() -> None   # in-place-reload reconciliation: releases all blocked entry waits
 pending_count() -> int
-# /positions /pnl /skills /slate /halt <reason> /resume are REAL Discord slash
+# /positions /pnl /skills /window /halt <reason> /resume are REAL Discord slash
 # commands (2026-07-17): registered + dispatched by kalshi_bots/discord_gateway.py
 # (discord.py gateway client), calling handle_command() above. Button clicks
 # (Approve/Reject) are handled the same way, via resolve_card().
@@ -55,7 +55,7 @@ Exceptions: `DiscordError` (base — also raised for a bad `MODE` or autonomous+
 10. Discord outage in manual-approve mode ⇒ no approvals possible ⇒ no new entries; exits unaffected. Pending-card state is in-memory only, so a process restart has no pending cards to leak; `expire_all_pending()` exists for in-place reloads and releases every blocked entry wait as expired. In manual-approve, the trader re-proposes if the signal still verifies.
 
 ### Slash commands
-11. `/positions` — open positions + `ExposureSummary` from risk-management, with per-event open-cost lines from `by_event` (one event ticker = one 15-minute window). `/pnl` — daily realized P&L, env-labeled (`env=demo|prod`). `/skills` — vault query of `02-trading-skills` notes with `status: confirmed` (the notes whose frontmatter carries `families`, e.g. `[KXBTC15M]`, and `signal_types`), showing `demo_win_rate`/`demo_sample_size`. `/slate` — body of the most recent `03-market-context/daily-slate` note. `/halt <reason>` — `risk_management.set_halt(True, reason, caller="discord")` + a `critical` notify; halt state persists via the ledger note, so a restart stays halted; ack posted. `/resume` — clears halt + a `warn` notify; requires the same role. Unknown commands return `unknown command: <cmd>`.
+11. `/positions` — open positions + `ExposureSummary` from risk-management, with per-event open-cost lines from `by_event` (one event ticker = one 15-minute window). `/pnl` — daily realized P&L, env-labeled (`env=demo|prod`). `/skills` — vault query of `02-trading-skills` notes with `status: confirmed` (the notes whose frontmatter carries `families`, e.g. `[KXBTC15M]`, and `signal_types`), showing `demo_win_rate`/`demo_sample_size`. `/window` — the most recently updated `03-market-context/active-windows` note: ticker, phase, strike, spot, sigma (crypto has no daily slate; the window resolves live from the clock every 15 minutes). `/halt <reason>` — `risk_management.set_halt(True, reason, caller="discord")` + a `critical` notify; halt state persists via the ledger note, so a restart stays halted; ack posted. `/resume` — clears halt + a `warn` notify; requires the same role. Unknown commands return `unknown command: <cmd>`.
 12. Slash-command sync: instant when the guild is known (`DISCORD_GUILD_ID`, or auto-detected if the bot is in exactly one guild); otherwise global sync (~1hr propagation) with a logged warning.
 
 ### Postmortem rollups — PLANNED (sprint-4)
@@ -82,7 +82,7 @@ Exceptions: `DiscordError` (base — also raised for a bad `MODE` or autonomous+
 - **`/halt` during an in-flight approved order:** halt blocks new entries (the trader checks `risk.halted()` per signal); the in-flight order proceeds (it was approved pre-halt) — documented so nobody expects halt to claw back a click.
 
 ## Dependencies
-risk-management (exposure, halt), vault (skills/slate queries, halt persistence via ledger). Called by: trader (exit notifies now; entry cards from sprint-3), orchestrator + agents (notify/escalation; `flush()` each cycle; transport cascade at startup). Not on the critical path (rule 8's carve-out aside).
+risk-management (exposure, halt), vault (skill/window queries, halt persistence via ledger). Called by: trader (exit notifies now; entry cards from sprint-3), orchestrator + agents (notify/escalation; `flush()` each cycle; transport cascade at startup). Not on the critical path (rule 8's carve-out aside).
 
 ## Testing requirements
 - Timeout → cancel, never place: clock-controlled test around the approval timeout.

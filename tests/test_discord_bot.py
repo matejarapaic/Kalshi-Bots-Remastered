@@ -223,3 +223,22 @@ class TestCommands:
 
     def test_unknown(self, bot):
         assert "unknown command" in bot.handle_command("dance")
+
+    def test_window_no_note_yet(self, bot):
+        assert bot.handle_command("window") == "no active window note yet"
+
+    def test_window_shows_most_recently_updated(self, bot):
+        (bot.vault._abs("03-market-context/active-windows")).mkdir(parents=True)
+        bot.vault.write_note(
+            "03-market-context/active-windows/KXBTC15M-1.md",
+            {"market_ticker": "KXBTC15M-1", "phase": "settled", "strike": 100.0,
+             "spot": 101.0, "sigma": 0.5, "updated": "2026-07-23T01:00:00+00:00"},
+            "# w1\n", caller="window-monitor")
+        bot.vault.write_note(
+            "03-market-context/active-windows/KXBTC15M-2.md",
+            {"market_ticker": "KXBTC15M-2", "phase": "midpoint", "strike": 200.0,
+             "spot": 202.0, "sigma": 0.6, "updated": "2026-07-23T01:15:00+00:00"},
+            "# w2\n", caller="window-monitor")
+        out = bot.handle_command("window")
+        assert "KXBTC15M-2" in out and "midpoint" in out
+        assert "KXBTC15M-1" not in out

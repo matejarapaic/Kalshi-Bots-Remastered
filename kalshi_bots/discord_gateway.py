@@ -98,9 +98,9 @@ def _register_commands(tree: app_commands.CommandTree, client: "_GatewayClient")
         text = _handle("skills", "", str(interaction.user))
         await interaction.response.send_message((text or "(no confirmed skills)")[:DISCORD_MAX_LEN])
 
-    @tree.command(name="slate", description="Show the most recent daily-slate note")
-    async def slate_cmd(interaction: discord.Interaction):
-        await interaction.response.send_message(_handle("slate", "", str(interaction.user))[:DISCORD_MAX_LEN])
+    @tree.command(name="window", description="Show the active 15-minute window's state")
+    async def window_cmd(interaction: discord.Interaction):
+        await interaction.response.send_message(_handle("window", "", str(interaction.user))[:DISCORD_MAX_LEN])
 
     @tree.command(name="halt", description="Stop all new entries immediately (open positions can still exit)")
     @app_commands.describe(reason="Why you're halting (optional)")

@@ -268,8 +268,14 @@ class DiscordBot:
             self.risk.set_halt(False, "", caller="discord")
             self.notify(f"resumed by {user}", level="warn")
             return "resumed"
-        if cmd == "slate":
+        if cmd == "window":
             from kalshi_bots.types import VaultQuery
-            notes = self.vault.query(VaultQuery(directory="03-market-context/daily-slate"))
-            return notes[-1].body if notes else "no slate note"
+            notes = self.vault.query(VaultQuery(directory="03-market-context/active-windows"))
+            if not notes:
+                return "no active window note yet"
+            note = max(notes, key=lambda n: n.frontmatter.get("updated", ""))
+            fm = note.frontmatter
+            return (f"{fm.get('market_ticker')} [{fm.get('phase')}] "
+                    f"strike={fm.get('strike')} spot={fm.get('spot')} "
+                    f"sigma={fm.get('sigma')}")
         return f"unknown command: {cmd}"
