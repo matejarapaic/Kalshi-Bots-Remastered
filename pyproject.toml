@@ -1,13 +1,18 @@
 [project]
 name = "kalshi-bots"
 version = "0.1.0"
-description = "Kalshi sports prediction-market trading system (demo)"
+description = "Kalshi 15-minute crypto prediction-market trading system (demo)"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
     "PyYAML>=6.0",
     "cryptography>=42.0",
     "python-dotenv>=1.0",
+    # crypto-pivot streaming stack: exchange + Kalshi WS feeds, fast JSON,
+    # realized-vol math. No TA/ML libraries — realized vol is plain numpy.
+    "websockets>=12.0",
+    "orjson>=3.9",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

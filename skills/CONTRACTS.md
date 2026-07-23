@@ -10,7 +10,8 @@ listed here.
 
 - **Probabilities** are `float` in `[0.0, 1.0]`. Never percentages, never cents.
 - **Prices** are integer cents `1–99` (`Cents = int`). Conversion between price and
-  probability happens ONLY in `kalshi-client` (de-vig) and `odds-api` (odds math).
+  probability happens ONLY in `kalshi-client` (de-vig). <!-- TODO(sprint-2): was
+  "and odds-api (odds math)" — odds-api deleted in the crypto pivot. -->
 - **Timestamps** are timezone-aware UTC `datetime`. Every externally-fetched datum
   carries `fetched_at` (when we polled) and, where the source provides one,
   `source_ts` (the source's own timestamp). Staleness checks always use `fetched_at`.
@@ -18,59 +19,68 @@ listed here.
 - **Errors**: each skill raises its own typed exceptions (`KalshiClientError`,
   `VaultError`, …) — no bare exceptions cross a skill boundary. Every skill's spec
   lists its exception types.
+<!-- TODO(sprint-2): remove after types.py rewrite — sports-era convention
 - **League IDs**: `LeagueId = Literal["nfl", "nba", "mlb"]` — matches
   `league-config.md` keys.
+-->
 
 ## Core types
 
 ```python
 Prob = float          # 0.0–1.0
 Cents = int           # 1–99
-LeagueId = Literal["nfl", "nba", "mlb"]
-GameStatus = Literal["scheduled", "in_progress", "final", "postponed", "suspended"]
-InjuryStatus = Literal["OUT", "DOUBTFUL", "QUESTIONABLE", "PROBABLE", "DAY_TO_DAY", "ACTIVE"]
 Side = Literal["yes", "no"]
 
-@dataclass
-class TeamRef:
-    league: LeagueId
-    espn_abbr: str          # authoritative key into league-config alias map
-    kalshi_abbr: str | None # None until verified against a live ticker
-    display_name: str
-
-@dataclass
-class GameState:
-    league: LeagueId
-    espn_event_id: str
-    status: GameStatus
-    home: TeamRef
-    away: TeamRef
-    home_score: int
-    away_score: int
-    period: int                    # quarter / inning number; 0 if not started
-    period_half: Literal["top", "bottom"] | None  # MLB only, else None
-    clock_seconds: int | None      # NFL/NBA game clock; None for MLB
-    win_prob_home: Prob | None     # ESPN model; None if feed absent
-    win_prob_source_ts: datetime | None
-    start_time: datetime
-    fetched_at: datetime
-
-@dataclass
-class InjuryEvent:
-    league: LeagueId
-    team: TeamRef
-    espn_event_id: str | None   # None for pregame/team-level news
-    player_id: str
-    player_name: str
-    position: str
-    status: InjuryStatus
-    source_ts: datetime | None
-    fetched_at: datetime
+# TODO(sprint-2): remove after types.py rewrite — sports-specific types below
+# are retired by the crypto pivot. Kept commented (not deleted) until Sprint 2
+# rewrites types.py so nothing silently depends on them in the interim.
+#
+# LeagueId = Literal["nfl", "nba", "mlb"]
+# GameStatus = Literal["scheduled", "in_progress", "final", "postponed", "suspended"]
+# InjuryStatus = Literal["OUT", "DOUBTFUL", "QUESTIONABLE", "PROBABLE", "DAY_TO_DAY", "ACTIVE"]
+#
+# @dataclass
+# class TeamRef:
+#     league: LeagueId
+#     espn_abbr: str          # authoritative key into league-config alias map
+#     kalshi_abbr: str | None # None until verified against a live ticker
+#     display_name: str
+#
+# @dataclass
+# class GameState:
+#     league: LeagueId
+#     espn_event_id: str
+#     status: GameStatus
+#     home: TeamRef
+#     away: TeamRef
+#     home_score: int
+#     away_score: int
+#     period: int                    # quarter / inning number; 0 if not started
+#     period_half: Literal["top", "bottom"] | None  # MLB only, else None
+#     clock_seconds: int | None      # NFL/NBA game clock; None for MLB
+#     win_prob_home: Prob | None     # ESPN model; None if feed absent
+#     win_prob_source_ts: datetime | None
+#     start_time: datetime
+#     fetched_at: datetime
+#
+# @dataclass
+# class InjuryEvent:
+#     league: LeagueId
+#     team: TeamRef
+#     espn_event_id: str | None   # None for pregame/team-level news
+#     player_id: str
+#     player_name: str
+#     position: str
+#     status: InjuryStatus
+#     source_ts: datetime | None
+#     fetched_at: datetime
 
 @dataclass
 class MarketRef:
+    # TODO(sprint-2): rework — drop `league`/`yes_team_kalshi_abbr`, key on
+    # series/event/market tickers only (crypto windows have no teams).
     league: LeagueId
-    series_ticker: str          # e.g. KXMLBGAME (verify at runtime)
+    series_ticker: str          # e.g. KXBTC15M (verify at runtime)
     event_ticker: str
     market_ticker: str
     yes_team_kalshi_abbr: str   # which team YES resolves for
@@ -96,46 +106,51 @@ class OrderbookSnapshot:
     spread_cents: int | None
     fetched_at: datetime
 
-@dataclass
-class BookQuote:
-    book_name: str
-    home_prob: Prob             # de-vigged, this book alone
-    fetched_at: datetime
-    source_ts: datetime | None
-
-@dataclass
-class ConsensusOdds:
-    league: LeagueId
-    home: TeamRef
-    away: TeamRef
-    espn_event_id: str | None   # set once league-matching has resolved it
-    book_count: int
-    devigged_home_prob: Prob    # consensus (mean of de-vigged book probs)
-    max_pairwise_disagreement: float  # max |prob_i - prob_j| across books
-    books: list[BookQuote]
-    fetched_at: datetime
-
-@dataclass
-class MatchResult:
-    espn_event_id: str
-    market: MarketRef | None    # None = no unambiguous match; NEVER a guess
-    method: Literal["alias_exact", "alias_plus_start_time", "none"]
-    ambiguous: bool             # True when >1 candidate survived tie-breaking
-    candidates_considered: int
-
-SignalType = Literal[
-    "overreaction-candidate", "divergence-candidate",
-    "injury-candidate", "garbage-time-candidate", "game-final",
-]
-
-@dataclass
-class CandidateSignal:
-    signal_type: SignalType
-    league: LeagueId
-    espn_event_id: str
-    market_ticker: str | None
-    payload: dict               # per-type shape documented in espn-data / skill specs
-    emitted_at: datetime
+# TODO(sprint-2): remove after types.py rewrite — sports-specific types below.
+#
+# @dataclass
+# class BookQuote:
+#     book_name: str
+#     home_prob: Prob             # de-vigged, this book alone
+#     fetched_at: datetime
+#     source_ts: datetime | None
+#
+# @dataclass
+# class ConsensusOdds:
+#     league: LeagueId
+#     home: TeamRef
+#     away: TeamRef
+#     espn_event_id: str | None   # set once league-matching has resolved it
+#     book_count: int
+#     devigged_home_prob: Prob    # consensus (mean of de-vigged book probs)
+#     max_pairwise_disagreement: float  # max |prob_i - prob_j| across books
+#     books: list[BookQuote]
+#     fetched_at: datetime
+#
+# @dataclass
+# class MatchResult:
+#     espn_event_id: str
+#     market: MarketRef | None    # None = no unambiguous match; NEVER a guess
+#     method: Literal["alias_exact", "alias_plus_start_time", "none"]
+#     ambiguous: bool             # True when >1 candidate survived tie-breaking
+#     candidates_considered: int
+#
+# SignalType = Literal[
+#     "overreaction-candidate", "divergence-candidate",
+#     "injury-candidate", "garbage-time-candidate", "game-final",
+# ]
+#
+# @dataclass
+# class CandidateSignal:
+#     signal_type: SignalType
+#     league: LeagueId
+#     espn_event_id: str
+#     market_ticker: str | None
+#     payload: dict               # per-type shape documented in espn-data / skill specs
+#     emitted_at: datetime
+#
+# TODO(sprint-2): CandidateSignal is replaced by CryptoSignal; SizingRequest's
+# `signal` field re-types accordingly in the same rewrite.
 
 @dataclass
 class SkillMatch:
@@ -204,8 +219,9 @@ class VaultQuery:
    symmetrically for NO). The derivation lives in `kalshi-client` only.
 3. No skill reads vault files from disk on a live trading cycle — all vault access
    through the `vault` skill's TTL cache.
-4. Ambiguity → `None`, never a guess: league-matching, and any skill consuming it,
-   must treat `market=None` / `ambiguous=True` as "do not trade this game."
+4. Ambiguity → `None`, never a guess: window-monitor (formerly league-matching),
+   and any skill consuming it, must treat an unresolved active window as "do not
+   trade right now."
 5. Every numeric trading parameter lives in `risk-management`'s named parameter
    table or a skill note's frontmatter — never inline in another skill's logic.
 6. All trading on `KALSHI_ENV=demo` until the Phase 3 final checkpoint explicitly
