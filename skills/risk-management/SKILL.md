@@ -43,6 +43,12 @@ Implemented as module-level constants in `kalshi_bots/skills/risk_management.py`
 | `PER_TRADE_CAP_PCT["btc-15min-vol-spike"]` | 3 | |
 | `SKILL_MIN_DEPTH` (all three skills) | 100 | absolute depth minimum: contracts within 2¢ of entry, per skill note |
 | `MAX_CONTRACTS_PER_WINDOW` | 20 | hard contract cap per 15-min window — draft-skill training wheels |
+| `MIN_EDGE_CENTS` | 4 | fair-value entry: model-vs-ask divergence required (trader + monitor read it here) |
+| `EXIT_EDGE_CENTS` | 1 | fair-value exit: held-side edge at/below this = thesis played out |
+| `SIGMA_PLAUSIBLE_MIN/MAX` | 0.20 / 2.00 | annualized vol band outside which the model is not trusted |
+| `MIN_DEPTH_WITHIN_5C` | 100 | entry gate: contracts within 5¢, each side |
+| `DEPTH_COLLAPSE_FRACTION` | 0.5 | exit when either side < `MIN_DEPTH_WITHIN_5C ×` this |
+| `ENTRY_PHASES` | `("midpoint",)` | no entries in opening or near_close |
 
 ### PROPOSED 2026-07-22 (values carried unchanged from the owner-confirmed 2026-07-17 Phase-2 "tighter variant" checkpoint; re-scoped per-event for crypto windows, pending owner re-confirmation for this market family)
 | Name | Value | Meaning |

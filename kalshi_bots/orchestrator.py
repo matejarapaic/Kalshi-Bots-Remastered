@@ -127,7 +127,8 @@ class Orchestrator:
         self.monitor = WindowMonitor(self.vault, self.resolver,
                                      book=self.book, feed=self.feed)
         self.trader = Trader(self.vault, self.broker, self.risk,
-                             self.discord, env="demo")
+                             self.discord, env="demo",
+                             feed=self.feed, book=self.book)
         try:
             counts = self.trader.reload_open_trades(self.risk.last_reconcile_settled)
             if counts["restored"] or counts["closed"]:
@@ -174,7 +175,7 @@ class Orchestrator:
                 continue
             if sig.signal_type == "fair-value-candidate":
                 try:
-                    disposition = self.trader.handle_signal(sig)
+                    disposition = self.trader.handle_signal(sig, now=now)
                 except Exception as e:
                     log.error("trader signal handling failed: %s", e)
                     disposition = f"declined:handler_error({e})"

@@ -1,23 +1,30 @@
 """window-monitor agent. Prompt: vault 01-agents/window-monitor/system-prompt.md.
 
 Watches the active 15-minute window and market state; emits lifecycle signals
-(window-open, phase-change, window-close) and — from sprint-3 — fair-value
-candidates; never places orders. Writes active-window notes (frontmatter =
-machine state, Signals section = log) via the vault skill.
+(window-open, phase-change, window-close) and fair-value candidates; never
+places orders. A candidate is a flag, not a vouch — the trader recomputes
+everything from fresh data at decision time. Writes active-window notes
+(frontmatter = machine state, Signals section = log) via the vault skill.
 """
 from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
+from kalshi_bots.skills.fair_value_model import evaluate, side_edges
+from kalshi_bots.skills.risk_management import ENTRY_PHASES, MIN_EDGE_CENTS
 from kalshi_bots.skills.window_monitor import window_phase
 from kalshi_bots.types import CryptoSignal, MarketRef, Phase, WindowRef
 
 log = logging.getLogger(__name__)
 
 NOTE_UPDATE_S = 30  # steady-state note refresh cadence (writes are disk I/O)
+CANDIDATE_COOLDOWN_S = 30  # min gap between candidate flags per window (the
+                           # trader's position-exists gate dedupes after a
+                           # fill; this throttles unfilled/declined retries)
 
 
 class WindowMonitor:
@@ -29,6 +36,7 @@ class WindowMonitor:
         self.current_window: WindowRef | None = None
         self.current_phase: Phase | None = None
         self._last_note_write: float = 0.0
+        self._last_candidate_mono: float | None = None  # reset per window
 
     @staticmethod
     def _market_ref(w: WindowRef) -> MarketRef:
@@ -71,6 +79,7 @@ class WindowMonitor:
             else:
                 self.current_phase = None
             self.current_window = w
+            self._last_candidate_mono = None
             return signals
 
         if w is None:
@@ -86,7 +95,55 @@ class WindowMonitor:
             self._write_window_note(self.current_window, ph, now, force=True)
         else:
             self._write_window_note(self.current_window, ph, now)
+
+        candidate = self._detect_candidate(self.current_window, ph, now)
+        if candidate is not None:
+            signals.append(candidate)
         return signals
+
+    # --- candidate detection (flags only; the trader re-verifies) ---
+
+    def _detect_candidate(self, w: WindowRef, ph: Phase,
+                          now: datetime) -> CryptoSignal | None:
+        if ph not in ENTRY_PHASES or w.strike is None or self.feed is None:
+            return None
+        mono = time.monotonic()
+        if (self._last_candidate_mono is not None
+                and mono - self._last_candidate_mono < CANDIDATE_COOLDOWN_S):
+            return None
+        spot = self.feed.current_composite()
+        sigma = self.feed.realized_vol()
+        if spot is None or sigma is None:
+            return None  # fail closed: no flag without healthy model inputs
+        snapshot = self.book.snapshot(w.market_ticker) if self.book else None
+        if snapshot is None:
+            return None  # no trustworthy book: nothing to diverge from
+        try:
+            est = evaluate(w, spot, snapshot, sigma, now=now)
+        except Exception as e:
+            log.warning("fair-value evaluate failed for %s: %s", w.market_ticker, e)
+            return None
+        edges = side_edges(est, snapshot)
+        best_side = max((s for s in ("yes", "no") if edges[s] is not None),
+                        key=lambda s: edges[s], default=None)
+        if best_side is None or edges[best_side] < MIN_EDGE_CENTS:
+            return None
+        self._last_candidate_mono = mono
+        sig = CryptoSignal(
+            signal_type="fair-value-candidate", series_ticker=w.series_ticker,
+            market_ticker=w.market_ticker, window=w, phase=ph,
+            payload={
+                "id": str(uuid.uuid4())[:8],
+                "side": best_side,
+                "edge_cents": round(edges[best_side], 2),
+                "model_prob_up": round(est.model_prob_up, 4),
+                "entry_price_cents": (snapshot.yes_ask if best_side == "yes"
+                                      else snapshot.no_ask),
+                "sigma": sigma, "spot": spot.mid, "strike": w.strike,
+            },
+            emitted_at=datetime.now(timezone.utc))
+        self._log_signal(w, sig)
+        return sig
 
     # --- helpers ---
 

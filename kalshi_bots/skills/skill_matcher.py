@@ -54,8 +54,15 @@ def derive_condition_tags(signal: CryptoSignal,
 
 
 class SkillMatcher:
-    def __init__(self, vault: Vault):
+    def __init__(self, vault: Vault,
+                 allowed_statuses: tuple[str, ...] = ("confirmed",)):
+        """allowed_statuses widens matching for paper/demo calibration: the
+        trader passes ("confirmed", "draft") on demo so draft skills can
+        accumulate demo_* stats toward confirmation. Live trading keeps the
+        confirmed-only default AND the sprint-5 guard re-asserts it — "draft
+        never trades live money" is enforced twice."""
         self.vault = vault
+        self.allowed_statuses = allowed_statuses
         self._last_confirmed_count: int | None = None
 
     def match(self, signal: CryptoSignal,
@@ -66,18 +73,21 @@ class SkillMatcher:
             return []  # lifecycle signals never match trading skills
 
         try:
-            notes = self.vault.query(VaultQuery(
-                directory="02-trading-skills",
-                frontmatter_filters={"status": "confirmed"}))
+            all_notes = self.vault.query(VaultQuery(directory="02-trading-skills"))
         except Exception as e:
             raise SkillMatcherError(f"vault unavailable: {e}") from e
+        notes = [n for n in all_notes
+                 if n.frontmatter.get("status") in self.allowed_statuses
+                 and not n.path.endswith("_skill-template.md")]
 
+        confirmed = sum(1 for n in all_notes
+                        if n.frontmatter.get("status") == "confirmed")
         if self._last_confirmed_count is not None and \
-                len(notes) < self._last_confirmed_count:
+                confirmed < self._last_confirmed_count:
             log.error("confirmed skill count dropped %d -> %d — a skill vanished "
                       "from the library (incident, not a quiet day)",
-                      self._last_confirmed_count, len(notes))
-        self._last_confirmed_count = len(notes)
+                      self._last_confirmed_count, confirmed)
+        self._last_confirmed_count = confirmed
 
         derived = derive_condition_tags(signal, now)
         out: list[SkillMatch] = []

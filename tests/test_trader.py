@@ -1,6 +1,10 @@
-"""trader agent tests (sprint-2 scope: decline-by-default, restart recovery,
-near-close exit sweep). The full entry path (fair-value re-verification,
-sizing, execution) is covered from sprint-3.
+"""trader agent tests: fresh-data re-verification, full entry path, exit
+rules, restart recovery. All offline against in-memory fakes (never mocked
+network), per testing conventions.
+
+Model numbers used below (hand-checked): spot 66000, strike 65900, sigma 0.6,
+600s remaining -> p_up = Phi(ln(66000/65900) / (0.6*sqrt(600/31536000)))
+≈ 0.7188, i.e. fair ~71.9c.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -9,20 +13,20 @@ import pytest
 from kalshi_bots.agents.trader import Trader
 from kalshi_bots.skills.vault import Vault
 from kalshi_bots.types import (
-    CryptoSignal, MarketRef, OrderbookSnapshot, OrderResult, Settlement,
-    WindowRef,
+    ApprovalOutcome, CompositeSpot, CryptoSignal, DepthLevel, Fill, MarketRef,
+    OrderbookSnapshot, OrderResult, Settlement, SizingResult, WindowRef,
 )
 
 NOW = datetime(2026, 7, 23, 1, 20, tzinfo=timezone.utc)
 TICKER = "KXBTC15M-26JUL222130-30"
 
 
-def window(closes_at=None):
-    closes = closes_at or datetime(2026, 7, 23, 1, 30, tzinfo=timezone.utc)
+def window(closes_in_s=600.0, strike=65900.0):
+    closes = NOW + timedelta(seconds=closes_in_s)
     return WindowRef(series_ticker="KXBTC15M",
                      event_ticker="KXBTC15M-26JUL222130", market_ticker=TICKER,
-                     opens_at=closes - timedelta(minutes=15), closes_at=closes,
-                     strike=66010.86)
+                     opens_at=closes - timedelta(seconds=900), closes_at=closes,
+                     strike=strike)
 
 
 def market():
@@ -32,59 +36,124 @@ def market():
                      settlement_notes=None)
 
 
-def signal(sig_type="fair-value-candidate", ticker=TICKER):
+def snapshot(yes_ask=55, no_ask=55, depth=500):
+    return OrderbookSnapshot(
+        market=market(),
+        yes_bid=100 - no_ask, yes_ask=yes_ask,
+        no_bid=100 - yes_ask, no_ask=no_ask,
+        yes_book=[DepthLevel(yes_ask, depth)] if yes_ask else [],
+        no_book=[DepthLevel(no_ask, depth)] if no_ask else [],
+        devigged_yes_prob=0.5, spread_cents=yes_ask - (100 - no_ask),
+        fetched_at=NOW)
+
+
+def signal(sig_type="fair-value-candidate", ticker=TICKER, w=None):
     return CryptoSignal(signal_type=sig_type, series_ticker="KXBTC15M",
-                        market_ticker=ticker, window=window(), phase="midpoint",
-                        payload={"id": "sig-1"}, emitted_at=NOW)
+                        market_ticker=ticker, window=w or window(),
+                        phase="midpoint",
+                        payload={"id": "sig-1", "sigma": 0.6},
+                        emitted_at=datetime.now(timezone.utc))
+
+
+class FakeFeed:
+    def __init__(self, mid=66000.0, sigma=0.6, healthy=5):
+        self.mid, self.sigma, self.healthy = mid, sigma, healthy
+
+    def current_composite(self):
+        if self.mid is None:
+            return None
+        return CompositeSpot(mid=self.mid, bid=self.mid - 0.5, ask=self.mid + 0.5,
+                             source_ts={}, computed_at=datetime.now(timezone.utc),
+                             constituents_healthy=self.healthy, constituent_count=5)
+
+    def realized_vol(self, window_s=900):
+        return self.sigma
+
+
+class FakeBook:
+    def __init__(self, snap):
+        self.snap = snap
+
+    def snapshot(self, ticker):
+        return self.snap
 
 
 class FakeBroker:
     def __init__(self):
-        self.markets = {TICKER: market()}
-        self.yes_bid = 55
         self.orders = []
-        self.fills = []
+        self.fill_price_bump = 0
+        self.snap = snapshot()
 
     def get_market(self, ticker, family=""):
-        return self.markets[ticker]
+        return market()
 
     def get_orderbook(self, m):
-        return OrderbookSnapshot(market=m, yes_bid=self.yes_bid,
-                                 yes_ask=(self.yes_bid + 2) if self.yes_bid else None,
-                                 no_bid=(100 - self.yes_bid - 2) if self.yes_bid else None,
-                                 no_ask=(100 - self.yes_bid) if self.yes_bid else None,
-                                 yes_book=[], no_book=[],
-                                 devigged_yes_prob=0.56, spread_cents=2,
-                                 fetched_at=NOW)
+        return self.snap
 
     def place_order(self, req):
         self.orders.append(req)
         return OrderResult(order_id=f"o{len(self.orders)}", status="filled",
                            filled_contracts=req.contracts,
-                           avg_fill_price=req.limit_price + 1, fee_cents=3, raw={})
+                           avg_fill_price=req.limit_price + self.fill_price_bump,
+                           fee_cents=3, raw={})
 
     def get_fills(self, ticker):
-        return self.fills
+        if not self.orders:
+            return []
+        req = self.orders[-1]
+        return [Fill(order_id=f"o{len(self.orders)}", market_ticker=ticker,
+                     side=req.side, action=req.action, contracts=req.contracts,
+                     price=req.limit_price, taker_fee_cents=3,
+                     ts=datetime.now(timezone.utc), raw={})]
 
 
 class FakeRisk:
-    def __init__(self, is_halted=False):
+    def __init__(self, contracts=10, is_halted=False):
+        self.contracts = contracts
         self.is_halted = is_halted
-        self.exits = []
+        self.fills, self.exits, self.cancels = [], [], []
 
     def halted(self):
         return self.is_halted, "manual" if self.is_halted else None
 
+    def size(self, req):
+        return SizingResult(contracts=self.contracts, limit_price=req.entry_price,
+                            kelly_fraction_used=0.05, capped_by=[],
+                            est_fee_cents_total=7)
+
+    def on_fill(self, fill, market, skill, event_id=""):
+        self.fills.append((market.market_ticker, skill))
+
     def on_exit(self, fill, market, skill):
         self.exits.append(market.market_ticker)
 
+    def cancel_intent(self, ticker, skill):
+        self.cancels.append((ticker, skill))
+
 
 class FakeDiscord:
-    def __init__(self):
-        self.notes = []
+    def __init__(self, decision="approved"):
+        self.decision = decision
+        self.cards, self.notes = [], []
+
+    def send_trade_card(self, card):
+        self.cards.append(card)
+        return ApprovalOutcome(decision=self.decision, decided_by="auto",
+                               decided_at=datetime.now(timezone.utc),
+                               card_message_id="m1")
 
     def notify(self, msg, level="info"):
         self.notes.append(msg)
+
+
+SKILL_FM = {
+    "skill": "btc-15min-fair-value", "families": ["KXBTC15M"],
+    "signal_types": ["fair-value-candidate"],
+    "market_conditions": ["live", "midpoint"],
+    "confidence_threshold": 0.6, "risk_profile": "medium",
+    "win_rate": None, "sample_size": 0, "status": "draft",
+    "last_updated": "2026-07-22",
+}
 
 
 @pytest.fixture
@@ -92,30 +161,163 @@ def vault(tmp_path):
     root = tmp_path / "vault"
     for d in ("04-trade-history/trades", "02-trading-skills"):
         (root / d).mkdir(parents=True)
-    return Vault(root=str(root))
+    v = Vault(root=str(root))
+    v.write_note("02-trading-skills/btc-15min-fair-value.md", dict(SKILL_FM),
+                 "# skill", caller="admin")
+    return v
 
 
-def make_trader(vault, broker=None, risk=None):
-    return Trader(vault, broker or FakeBroker(), risk or FakeRisk(), FakeDiscord())
+def make_trader(vault, broker=None, risk=None, discord=None, feed=None, book=None):
+    return Trader(vault, broker or FakeBroker(), risk or FakeRisk(),
+                  discord or FakeDiscord(), env="demo",
+                  feed=feed if feed is not None else FakeFeed(),
+                  book=book if book is not None else FakeBook(snapshot()))
 
 
-class TestSignalHandling:
+class TestSignalGates:
     def test_lifecycle_signals_are_not_trades(self, vault):
         t = make_trader(vault)
         for st in ("window-open", "phase-change", "window-close"):
             assert t.handle_signal(signal(st)) == "not-a-trade-signal"
 
     def test_unresolved_window_declined(self, vault):
-        t = make_trader(vault)
-        assert t.handle_signal(signal(ticker=None)) == "declined:unresolved_window"
+        assert make_trader(vault).handle_signal(
+            signal(ticker=None)) == "declined:unresolved_window"
 
     def test_halted_declined(self, vault):
         t = make_trader(vault, risk=FakeRisk(is_halted=True))
         assert t.handle_signal(signal()).startswith("declined:halted")
 
-    def test_candidate_declined_until_model_wired(self, vault):
+    def test_no_strike_declined(self, vault):
+        assert make_trader(vault).handle_signal(
+            signal(w=window(strike=None))) == "declined:no_strike"
+
+    def test_stale_spot_refuses(self, vault):
+        t = make_trader(vault, feed=FakeFeed(mid=None))
+        assert t.handle_signal(signal()) == "declined:spot_unavailable"
+
+    def test_missing_sigma_refuses(self, vault):
+        t = make_trader(vault, feed=FakeFeed(sigma=None))
+        assert t.handle_signal(signal()) == "declined:sigma_unavailable"
+
+    def test_draft_skill_matches_on_demo_only(self, vault):
+        # env=demo allows draft (calibration); a prod-configured matcher must not
+        t = Trader(vault, FakeBroker(), FakeRisk(), FakeDiscord(), env="prod",
+                   feed=FakeFeed(), book=FakeBook(snapshot()))
+        assert t.handle_signal(signal()) == "declined:matcher_below_threshold"
+
+
+class TestEntryPath:
+    def test_healthy_path_trades(self, vault):
+        broker, risk, discord = FakeBroker(), FakeRisk(), FakeDiscord()
+        t = make_trader(vault, broker=broker, risk=risk, discord=discord)
+        result = t.handle_signal(signal(), now=NOW)
+        assert result == "traded:10x@55"
+        assert broker.orders[0].side == "yes"        # model ~71.9c vs 55c ask
+        assert broker.orders[0].limit_price == 55
+        assert risk.fills == [(TICKER, "btc-15min-fair-value")]
+        assert len(t.open_trades) == 1
+        trade = next(iter(t.open_trades.values()))
+        assert trade["window"].strike == 65900.0
+        note = vault.read_note(trade["note"])
+        assert note.frontmatter["status"] == "open"
+        assert note.frontmatter["strike"] == 65900.0
+        assert note.frontmatter["entry_conditions"]["edge_ge_min"] is True
+
+    def test_small_edge_declined(self, vault):
+        # ask 70 vs model ~71.9 -> edge ~1.9 < 4
+        t = make_trader(vault, book=FakeBook(snapshot(yes_ask=70, no_ask=32)))
+        r = t.handle_signal(signal(), now=NOW)
+        assert r.startswith("declined:entry_verification_failed")
+        assert "edge_ge_min" in r
+
+    def test_near_close_phase_declined(self, vault):
+        w = window(closes_in_s=100.0)  # inside near_close
         t = make_trader(vault)
-        assert t.handle_signal(signal()) == "declined:model_not_wired(sprint-3)"
+        r = t.handle_signal(signal(w=w), now=NOW)
+        assert "phase_allowed" in r
+
+    def test_thin_book_declined(self, vault):
+        t = make_trader(vault, book=FakeBook(snapshot(depth=50)))
+        r = t.handle_signal(signal(), now=NOW)
+        assert "depth_both_sides" in r
+
+    def test_implausible_sigma_declined(self, vault):
+        t = make_trader(vault, feed=FakeFeed(sigma=3.0))
+        r = t.handle_signal(signal(), now=NOW)
+        assert "sigma_plausible" in r
+
+    def test_rejection_cancels_intent(self, vault):
+        risk = FakeRisk()
+        t = make_trader(vault, risk=risk, discord=FakeDiscord(decision="rejected"))
+        r = t.handle_signal(signal(), now=NOW)
+        assert r == "declined:approval_rejected"
+        assert risk.cancels == [(TICKER, "btc-15min-fair-value")]
+
+    def test_one_position_per_market_per_skill(self, vault):
+        t = make_trader(vault)
+        assert t.handle_signal(signal(), now=NOW).startswith("traded")
+        assert t.handle_signal(signal(), now=NOW) == "declined:position_exists"
+
+    def test_no_feed_fails_closed(self, vault):
+        t = Trader(vault, FakeBroker(), FakeRisk(), FakeDiscord(), env="demo",
+                   feed=None, book=FakeBook(snapshot()))
+        assert t.handle_signal(signal()) == "declined:no_feed"
+
+
+class TestExitRules:
+    def open_position(self, vault, **trader_kw):
+        t = make_trader(vault, **trader_kw)
+        assert t.handle_signal(signal(), now=NOW).startswith("traded")
+        return t
+
+    def exit_reason(self, t, now=NOW):
+        (coid, trade), = t.open_trades.items()
+        return t._exit_reason(trade, now)
+
+    def test_holds_while_edge_persists(self, vault):
+        t = self.open_position(vault)
+        assert self.exit_reason(t) is None
+
+    def test_edge_converged_take_profit(self, vault):
+        t = self.open_position(vault)
+        # market moved to fair: ask 71 vs model ~71.9 -> edge ~0.9 <= 1
+        t.book = FakeBook(snapshot(yes_ask=71, no_ask=31))
+        assert self.exit_reason(t) == "edge_converged"
+
+    def test_edge_inverted_stop(self, vault):
+        t = self.open_position(vault)
+        # market overshot fair: NO side now cheap (no_ask 25 vs model_down ~28)
+        t.book = FakeBook(snapshot(yes_ask=76, no_ask=25))
+        assert self.exit_reason(t) == "edge_inverted"
+
+    def test_depth_collapse_exits(self, vault):
+        t = self.open_position(vault)
+        t.book = FakeBook(snapshot(depth=40))  # < 100 * 0.5
+        assert self.exit_reason(t) == "depth_collapse"
+
+    def test_feed_loss_exits(self, vault):
+        t = self.open_position(vault)
+        t.feed = FakeFeed(mid=None)
+        assert self.exit_reason(t) == "feed_loss"
+
+    def test_near_close_overrides_everything(self, vault):
+        t = self.open_position(vault)
+        t.feed = FakeFeed(mid=None)  # would be feed_loss, but near_close first
+        near = NOW + timedelta(seconds=500)  # window closes at NOW+600
+        assert self.exit_reason(t, now=near) == "near_close_exit"
+
+    def test_manage_positions_executes_exit(self, vault):
+        broker = FakeBroker()
+        risk = FakeRisk()
+        t = self.open_position(vault, broker=broker, risk=risk)
+        t.book = FakeBook(snapshot(yes_ask=71, no_ask=31))
+        broker.snap = snapshot(yes_ask=71, no_ask=31)
+        actions = t.manage_positions(now=NOW)
+        assert len(actions) == 1 and actions[0].endswith(":edge_converged")
+        assert broker.orders[-1].action == "sell"
+        assert risk.exits == [TICKER]
+        assert t.open_trades == {}
 
 
 def write_open_trade(vault, ticker=TICKER, coid="kb-abc123"):
@@ -124,22 +326,22 @@ def write_open_trade(vault, ticker=TICKER, coid="kb-abc123"):
         "family": "KXBTC15M", "market_ticker": ticker,
         "skill": "btc-15min-fair-value", "side": "yes", "contracts": 10,
         "entry_price_cents": 52, "signal_price_cents": 52, "fee_cents": 5,
-        "model_prob": 0.6, "entry_conditions": {}, "signal_id": "s1",
-        "status": "open", "realized_pnl_cents": None, "exit_deviation": False,
-        "env": "demo", "opened_at": NOW.isoformat(),
+        "model_prob": 0.6, "strike": 65900.0, "entry_conditions": {},
+        "signal_id": "s1", "status": "open", "realized_pnl_cents": None,
+        "exit_deviation": False, "env": "demo", "opened_at": NOW.isoformat(),
     }, "trade", caller="trader")
 
 
 class TestRestartRecovery:
-    def test_restores_open_trades_with_window(self, vault):
+    def test_restores_open_trades_with_window_and_strike(self, vault):
         write_open_trade(vault)
         t = make_trader(vault)
         counts = t.reload_open_trades()
         assert counts == {"restored": 1, "closed": 0}
         trade = t.open_trades["kb-abc123"]
-        assert trade["window"] is not None
         assert trade["window"].closes_at == datetime(2026, 7, 23, 1, 30,
                                                      tzinfo=timezone.utc)
+        assert trade["window"].strike == 65900.0  # edge exits work post-restart
 
     def test_closes_settled_while_down(self, vault):
         write_open_trade(vault)
@@ -152,34 +354,3 @@ class TestRestartRecovery:
         assert note.frontmatter["status"] == "closed"
         # 10*100 - (10*52 + 5) = 475 on the recorded basis
         assert note.frontmatter["realized_pnl_cents"] == 475
-
-
-class TestExitSweep:
-    def test_near_close_exits_position(self, vault):
-        write_open_trade(vault)
-        broker = FakeBroker()
-        risk = FakeRisk()
-        t = make_trader(vault, broker=broker, risk=risk)
-        t.reload_open_trades()
-        # mid-window: no exit
-        assert t.manage_positions(now=NOW) == []
-        # 2 minutes before close: near_close -> mechanical exit
-        near = datetime(2026, 7, 23, 1, 28, tzinfo=timezone.utc)
-        actions = t.manage_positions(now=near)
-        assert actions == ["exited:kb-abc123:near_close_exit"]
-        assert t.open_trades == {}
-        assert broker.orders[0].action == "sell"
-        assert broker.orders[0].limit_price == broker.yes_bid - 1
-        note = vault.read_note("04-trade-history/trades/2026-07-23-kb-abc123.md")
-        assert note.frontmatter["status"] == "closed"
-        assert note.frontmatter["exit_reason"] == "near_close_exit"
-
-    def test_no_bid_retries_later(self, vault):
-        write_open_trade(vault)
-        broker = FakeBroker()
-        broker.yes_bid = None
-        t = make_trader(vault, broker=broker)
-        t.reload_open_trades()
-        near = datetime(2026, 7, 23, 1, 28, tzinfo=timezone.utc)
-        assert t.manage_positions(now=near) == []
-        assert "kb-abc123" in t.open_trades  # kept for retry, never dropped

@@ -46,6 +46,18 @@ SKILL_MIN_DEPTH = {                # contracts within 2c of entry, per skill not
 }
 MAX_CONTRACTS_PER_WINDOW = 20      # PROPOSED: hard contract cap per 15-min
                                    # window while skills are draft-calibrating
+# btc-15min-fair-value entry/exit parameters (PROPOSED 2026-07-22; mirrored in
+# the vault skill note — the note is the human-readable contract, this is the
+# single machine home for the numbers)
+MIN_EDGE_CENTS = 4                 # model-vs-ask divergence required to enter
+EXIT_EDGE_CENTS = 1                # edge below this = thesis played out, exit
+SIGMA_PLAUSIBLE_MIN = 0.20         # outside this band the model is not to be
+SIGMA_PLAUSIBLE_MAX = 2.00         # trusted (broken feed or unmodeled regime)
+MIN_DEPTH_WITHIN_5C = 100          # contracts, EACH side, entry gate
+DEPTH_COLLAPSE_FRACTION = 0.5      # exit when either side falls below
+                                   # MIN_DEPTH_WITHIN_5C * this
+ENTRY_PHASES = ("midpoint",)       # no entries in opening (strike/book still
+                                   # settling) or near_close (gamma dominates)
 # CONFIRMED 2026-07-17 (Phase 2 checkpoint, "tighter variant") — carried to
 # crypto as PROPOSED until the owner re-confirms them for this market family
 TOTAL_EXPOSURE_CAP_PCT = 15

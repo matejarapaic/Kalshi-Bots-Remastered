@@ -13,11 +13,11 @@ fair-value model → signal → size → trade → exit → postmortem. Later cr
 families (`KXETH15M`, …) are in-architecture but out of scope for the first
 pivot — nothing may hard-code BTC.
 
-> **Pivot status:** sprints 0-2 are done — sports code removed, streaming
-> price feed + Kalshi WS order book + window monitor live, orchestrator on the
-> 1s streaming loop, suite green. Sprint 3 (fair-value model + trader entry
-> path) is next; the trader declines all candidates until it lands. Each
-> sprint commits as `sprint-N: …`.
+> **Pivot status:** sprints 0-3 are done — sports code removed; streaming
+> price feed, Kalshi WS order book, window monitor, fair-value model, and the
+> full trader entry/exit path are live; first vault trading skill
+> (btc-15min-fair-value, draft) written. Sprint 4 (postmortem/analyst at
+> 15-min cadence) is next. Each sprint commits as `sprint-N: …`.
 
 **The system is demo-only by design, enforced at multiple layers, not just by convention:**
 - `Orchestrator.__init__` refuses to start unless `KALSHI_ENV=demo`.
@@ -77,7 +77,7 @@ New crypto skills (built in sprint order):
 - `crypto-price-feed` (Sprint 1) — streaming multi-exchange BTC/USD composite approximating BRTI: weighted median of healthy constituents' mids, rolling realized-vol estimator from 1-second-resampled returns. Fail-closed: fewer than 2 healthy constituents → `current_composite()` returns `None`.
 - `kalshi-ws-orderbook` (Sprint 2) — WebSocket client for Kalshi's market-data feed on the active contract.
 - `window-monitor` (Sprint 2) — resolves the currently-active `KXBTC15M` ticker for a wall-clock time and tracks window lifecycle (`opening`, `midpoint`, `near_close`, `settled`). The entity-resolution role the deleted league-matching skill used to play; same hard invariant: ambiguity returns `None`, never a guess, and ticker grammar must be `grammar_verified` against live markets before matching.
-- `fair-value-model` (Sprint 3) — pure function: log-normal, drift-zero model probability from spot, strike, time remaining, realized vol.
+- `fair-value-model` (Sprint 3) — pure functions: log-normal, drift-zero model probability from spot, strike, time remaining, realized vol; per-side signed edges vs the book. The system's reference truth — no external sharper source exists at this horizon.
 
 ### Agents and orchestration
 
