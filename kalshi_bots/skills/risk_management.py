@@ -59,6 +59,21 @@ DEPTH_COLLAPSE_FRACTION = 0.5      # exit when either side falls below
                                    # MIN_DEPTH_WITHIN_5C * this
 ENTRY_PHASES = ("midpoint",)       # no entries in opening (strike/book still
                                    # settling) or near_close (gamma dominates)
+# PROPOSED 2026-07-24: universal hard risk backstop, independent of any
+# skill's own thesis-invalidation exits — applies to every open position
+# regardless of skill. Fires when the position's current mark-to-market
+# value has fallen to this fraction of entry cost or worse (e.g. 50 -> exit
+# once down 50% from entry). Awaiting owner sign-off.
+STOP_LOSS_PCT = 50
+# PROPOSED 2026-07-24: entry-sizing scale-down when the underlying spot is
+# moving unusually fast right now (see CryptoPriceFeed.recent_move_pct) —
+# a fast recent move raises the odds a computed edge is chasing a gap rather
+# than confirming a stable mispricing. Only entries ever reach sizing at all
+# (ENTRY_PHASES == midpoint-only), so this naturally only bites mid-window
+# entries, matching the "still at midpoint" case it was written for. Awaiting
+# owner sign-off.
+VELOCITY_THRESHOLD_PCT = 0.004     # 0.4% move within the feed's short window
+VELOCITY_SIZE_SCALE = 0.5          # fraction multiplier once threshold breached
 # CONFIRMED 2026-07-17 (Phase 2 checkpoint, "tighter variant"); re-confirmed
 # 2026-07-22 for the crypto market family, unchanged
 TOTAL_EXPOSURE_CAP_PCT = 15
@@ -216,7 +231,16 @@ class RiskManager:
             fraction = cap
             capped_by.append("per_trade_cap")
 
-        # (5) correlation scaling (same window/event)
+        # (5) velocity scaling: spot moving unusually fast right now, any
+        # skill — a fast recent move raises the odds an edge is chasing a
+        # gap rather than confirming a stable mispricing, so size smaller
+        # into it regardless of what the skill's own Kelly math says.
+        if req.recent_move_pct is not None and \
+                abs(req.recent_move_pct) >= VELOCITY_THRESHOLD_PCT:
+            fraction *= VELOCITY_SIZE_SCALE
+            capped_by.append("velocity_scale")
+
+        # (6) correlation scaling (same window/event)
         labels = {req.market.market_ticker}
         eid = req.event_id or (req.signal.window.event_ticker
                                if req.signal and req.signal.window else "")
@@ -226,30 +250,30 @@ class RiskManager:
 
         budget = int(fraction * bankroll)
 
-        # (6) per-event cap
+        # (7) per-event cap
         event_room = int(PER_EVENT_EXPOSURE_CAP_PCT / 100 * bankroll) - self._event_cost(eid, labels)
         if budget > event_room:
             budget = max(0, event_room)
             capped_by.append("per_event_cap")
 
-        # (7) total exposure cap
+        # (8) total exposure cap
         total_room = int(TOTAL_EXPOSURE_CAP_PCT / 100 * bankroll) - self._open_cost()
         if budget > total_room:
             budget = max(0, total_room)
             capped_by.append("total_exposure_cap")
 
-        # (8) daily-loss halt (incl. manual halt)
+        # (9) daily-loss halt (incl. manual halt)
         if self._halted:
             return zero("halted")
         if self._daily_halted(bankroll):
             return zero("daily_loss_halt")
 
-        # (9) max open positions
+        # (10) max open positions
         self._prune_intents()
         if len(self._positions) + len(self._intents) >= MAX_OPEN_POSITIONS:
             return zero("max_open_positions")
 
-        # (10) depth gate
+        # (11) depth gate
         if req.book_depth_at_entry < SKILL_MIN_DEPTH[skill]:
             return zero("depth_min")
         contracts = budget // c_f
@@ -258,12 +282,12 @@ class RiskManager:
             contracts = depth_cap
             capped_by.append("depth_gate")
 
-        # (11) per-window contract cap (draft-skill training wheels)
+        # (12) per-window contract cap (draft-skill training wheels)
         if contracts > MAX_CONTRACTS_PER_WINDOW:
             contracts = MAX_CONTRACTS_PER_WINDOW
             capped_by.append("per_window_contract_cap")
 
-        # (12) integer floor
+        # (13) integer floor
         if contracts < 1:
             return zero(capped_by[-1] if capped_by else "no_room")
 
@@ -294,11 +318,15 @@ class RiskManager:
             p["cost_cents"] += fill.contracts * fill.price + fill.taker_fee_cents
             self._persist()
 
-    def on_exit(self, fill: Fill, market: MarketRef, skill_name: str) -> None:
+    def on_exit(self, fill: Fill, market: MarketRef, skill_name: str) -> int | None:
+        """Returns the fee-inclusive realized pnl for this exit fill (basis
+        drawn from the ledger's recorded cost, which includes the entry fee),
+        or None if there was no matching open position — callers should treat
+        that as "nothing to record", not "zero pnl"."""
         with self._lock:
             p = self._positions.get(market.market_ticker)
             if not p or p["contracts"] == 0:
-                return
+                return None
             portion = min(fill.contracts, p["contracts"])
             basis = round(p["cost_cents"] * portion / p["contracts"])
             proceeds = portion * fill.price - fill.taker_fee_cents
@@ -310,6 +338,7 @@ class RiskManager:
             day = self._et_today()
             self._daily_pnl[day] = self._daily_pnl.get(day, 0) + pnl
             self._persist()
+            return pnl
 
     def on_settle(self, s: Settlement, market: MarketRef, skill_name: str) -> None:
         with self._lock:

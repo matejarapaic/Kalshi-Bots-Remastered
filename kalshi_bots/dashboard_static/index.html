@@ -70,6 +70,7 @@ header h1 {
   padding: 2px 8px; border-radius: 4px;
 }
 .badge-env { background: rgba(34,197,94,.15); color: var(--color-accent); border: 1px solid rgba(34,197,94,.4); }
+.badge-env.live { background: rgba(239,68,68,.18); color: var(--color-destructive); border: 1px solid rgba(239,68,68,.55); }
 .badge-halt { background: rgba(239,68,68,.15); color: var(--color-destructive); border: 1px solid rgba(239,68,68,.5); display: none; }
 .conn { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: var(--font-size-small); color: var(--text-muted); }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-destructive); }
@@ -346,6 +347,7 @@ async function refreshState() {
   } catch { setConn(false, "state fetch failed — retrying"); return; }
 
   $("env-badge").textContent = (s.env || "demo").toUpperCase();
+  $("env-badge").classList.toggle("live", s.env === "live");
   const e = s.exposure || {};
   $("halt-badge").style.display = e.halted ? "inline-block" : "none";
   if (e.halted) $("halt-badge").textContent = "HALTED — " + (e.halt_reason || "");

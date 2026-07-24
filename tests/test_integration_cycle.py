@@ -125,6 +125,9 @@ class FakeFeed:
     def realized_vol(self, window_s=900):
         return self.sigma
 
+    def recent_move_pct(self, window_s=60):
+        return None
+
 
 class FakeBook:
     """snapshot-only fake; subscribe/unsubscribe are async no-ops."""

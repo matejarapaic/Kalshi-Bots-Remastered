@@ -171,6 +171,8 @@ class SizingRequest:
     signal: CryptoSignal
     event_id: str = ""          # correlation key (event ticker)
     is_live: bool = True        # 24/7 crypto: effectively always True
+    recent_move_pct: float | None = None  # signed fractional spot move over
+                                # the feed's short window; None if unavailable
 
 @dataclass
 class SizingResult:

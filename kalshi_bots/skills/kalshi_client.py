@@ -356,11 +356,19 @@ class KalshiClient:
         if req.action == "buy" and req.limit_price is None:
             raise KalshiOrderRejected("market orders forbidden on entry (spec rule 11)")
         # v2 book is YES-only: "bid" buys YES, "ask" sells YES (economically
-        # equivalent to buying NO at 1 - price) — see create-order-v2 BookSide spec.
+        # equivalent to selling/buying NO at 1 - price) — see create-order-v2
+        # BookSide spec. book_side depends on BOTH side and action: buying NO
+        # is a "sell YES" (ask), but *selling* NO (an exit) is a "buy YES"
+        # (bid) — collapsing this to side-only previously sent every NO exit
+        # as another ask, i.e. another NO buy that doubled the position
+        # instead of closing it. Found live 2026-07-24 after a real fill
+        # confirmed a "sell no" exit executed as a second no buy at 1c.
         if req.side == "yes":
-            book_side, price_cents = "bid", req.limit_price
+            book_side = "bid" if req.action == "buy" else "ask"
+            price_cents = req.limit_price
         else:
-            book_side, price_cents = "ask", 100 - req.limit_price
+            book_side = "ask" if req.action == "buy" else "bid"
+            price_cents = 100 - req.limit_price
         body = {
             "ticker": req.market_ticker, "side": book_side,
             "count": f"{req.contracts:.2f}",

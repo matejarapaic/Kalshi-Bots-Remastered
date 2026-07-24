@@ -122,9 +122,11 @@ def create_app(orchestrator):
         bankroll = exp.bankroll_cents
         analyst = getattr(orchestrator, "analyst", None)
         recent = list(getattr(analyst, "recent_reports", []) or [])[-4:]
+        run_mode = getattr(orchestrator, "mode", "demo")  # "demo" | "live" — live_trading_guard's actual result
         return {
-            "env": "demo",
-            "mode": "paper" if getattr(orchestrator, "paper", True) else "demo-exchange",
+            "env": run_mode,
+            "mode": ("paper" if getattr(orchestrator, "paper", True)
+                     else ("live" if run_mode == "live" else "demo-exchange")),
             "window": _window_state(orchestrator),
             "feed": _feed_state(orchestrator),
             "exposure": dataclasses.asdict(exp),

@@ -303,6 +303,53 @@ class TestPlaceOrderV2:
         assert captured["body"]["side"] == "ask"
         assert captured["body"]["price"] == "0.3000"
 
+    def test_sell_no_posts_bid_not_ask(self, monkeypatch):
+        """Regression for a live incident 2026-07-24: exiting a NO position
+        was mapped to book_side by `side` alone, so a sell-no exit posted the
+        same "ask" as a buy-no entry — buying MORE no instead of closing the
+        position. A real exit at limit_price=1 got executed as a second NO
+        buy at 1c, doubling the position into worthless contracts held to
+        settlement (confirmed via the account's real fills/settlement)."""
+        c = self._client(monkeypatch)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["body"] = json
+            return _FakeResponse(200, {"order": {
+                "order_id": "o3", "status": "executed",
+                "fill_count_fp": "3.00", "taker_fill_cost_dollars": "0.0300",
+                "taker_fees_dollars": "0.00"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="no", action="sell",
+            contracts=3, limit_price=1, client_order_id="kb-4"))
+
+        # selling NO at 1c closes out via a bid at 1-0.01 on the YES-only book
+        assert captured["body"]["side"] == "bid"
+        assert captured["body"]["price"] == "0.9900"
+
+    def test_sell_yes_posts_ask_not_bid(self, monkeypatch):
+        """Same class of bug on the YES side: exiting a YES position must
+        post an ask (sell), not the bid a buy would use."""
+        c = self._client(monkeypatch)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["body"] = json
+            return _FakeResponse(200, {"order": {
+                "order_id": "o4", "status": "executed",
+                "fill_count_fp": "2.00", "taker_fill_cost_dollars": "1.9000",
+                "taker_fees_dollars": "0.00"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="yes", action="sell",
+            contracts=2, limit_price=95, client_order_id="kb-5"))
+
+        assert captured["body"]["side"] == "ask"
+        assert captured["body"]["price"] == "0.9500"
+
     def test_deprecated_endpoint_rejection_raises_order_rejected(self, monkeypatch):
         from kalshi_bots.skills.kalshi_client import KalshiOrderRejected
         c = self._client(monkeypatch)

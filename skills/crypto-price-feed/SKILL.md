@@ -17,6 +17,7 @@ class CryptoPriceFeed:
     async def stop(self) -> None
     def current_composite(self) -> CompositeSpot | None   # thread-safe read; None = fail closed
     def realized_vol(self, window_s: int = 900) -> float | None  # annualized; None = fail closed
+    def recent_move_pct(self, window_s: int = 60) -> float | None  # signed fractional move; None = fail closed
     def health(self) -> FeedHealth                   # per-exchange last-tick age, dropout state
 ```
 
@@ -56,6 +57,9 @@ BRTI is computed every 200ms from a consolidated, size-capped, uncrossed, depth-
 7. Sampling: an internal 1s task appends `(monotonic_ts, mid)` when — and only when — the composite is available. Unhealthy seconds leave a gap, never a stale or interpolated point.
 8. Fail-closed: `None` until the window holds ≥ `max(2, min(MIN_VOL_SAMPLES, MIN_VOL_COVERAGE·window_s/SAMPLE_INTERVAL_S))` samples spanning ≥ `MIN_VOL_COVERAGE` of `window_s`. The floor scales with the window because a 60s window can only ever hold ~59 one-second samples — a fixed 60-sample floor would make small windows permanently unanswerable (found live in the sprint-1 smoke run). Plausibility gating (e.g. 20%–200% annualized) is the *consumer's* job (trading-skill entry conditions), not this skill's.
 
+### Recent move (velocity)
+8b. `recent_move_pct(window_s)` = signed fractional change of the composite mid between the latest sample and the sample at (or just after) `now - window_s`, drawn from the same 1s-resampled buffer `realized_vol` uses (no separate history is kept). Consumed by risk-management's entry-sizing velocity scale (`VELOCITY_THRESHOLD_PCT`/`VELOCITY_SIZE_SCALE`) to size smaller into a spot that's moving unusually fast right now, independent of `realized_vol`'s longer-window estimate. Fail-closed: `None` if the buffer doesn't yet cover the full window, or if the latest sample is more than `2 * SAMPLE_INTERVAL_S` old (feed stalled) — a consumer seeing `None` simply skips the scale-down rather than guessing.
+
 ### Memory bounds (24/7 hygiene)
 9. Per constituent: last quote only. Vol buffer: one `deque(maxlen=MAX_SAMPLES)` of `(float, float)` tuples — ~3700 entries ≈ 1h window + slack. No per-tick history is stored anywhere; a week-long run holds the same memory as a minute-long one.
 
@@ -74,6 +78,7 @@ BRTI is computed every 200ms from a consolidated, size-capped, uncrossed, depth-
 | `MIN_VOL_COVERAGE` | 0.5 | of the requested window |
 | `MAX_SAMPLES` | 3700 | vol deque bound |
 | `RECONNECT_MAX_BACKOFF_S` | 30s | |
+| `VELOCITY_WINDOW_S` | 60s | short window for `recent_move_pct` |
 
 ## Edge cases
 - **Gemini stateful parse:** v1 `top_of_book` events replace the tracked side only when `remaining > 0`; a top-of-book removal is followed by the new top as its own event. A transiently crossed tracked pair is skipped (no tick), not published.
