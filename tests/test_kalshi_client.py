@@ -362,3 +362,52 @@ class TestPlaceOrderV2:
             c.place_order(OrderRequest(
                 market_ticker=MARKET.market_ticker, side="yes", action="buy",
                 contracts=1, limit_price=50, client_order_id="kb-3"))
+
+
+# A real fill row pulled live from /portfolio/fills on 2026-07-24. The fee is
+# carried as `fee_cost` (a dollar string) — NOT `taker_fees_dollars`, which only
+# exists on the *order* object. Reading the wrong key silently left
+# taker_fee_cents=0 on every real fill, so the risk ledger's cost basis and
+# realized P&L omitted actual trading fees (same class of bug as the settlement
+# revenue field fix). There is no `taker_fees_dollars` key on this object.
+REAL_FILL = {
+    "action": "buy", "book_side": "yes", "count_fp": "4.00",
+    "created_time": "2026-07-24T00:42:05.833916Z", "fee_cost": "0.070000",
+    "fill_id": "f1", "is_taker": True, "market_ticker": "KXBTC15M-26JUL222130-30",
+    "no_price_dollars": "0.5100", "order_id": "e0ca763f", "outcome_side": "yes",
+    "side": "yes", "subaccount_number": 0, "ticker": "KXBTC15M-26JUL222130-30",
+    "trade_id": "t1", "ts": 1784336830522, "yes_price_dollars": "0.4900",
+}
+
+
+class TestGetFills:
+    def _client(self, monkeypatch, payload):
+        monkeypatch.setenv("KALSHI_ENV", "demo")
+        monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
+        monkeypatch.delenv("KALSHI_KEY_PATH", raising=False)
+        c = KalshiClient()
+        c._key_id, c._private_key = "kid", object()  # bypass auth_required gate
+        c._headers = lambda method, path: {}
+        monkeypatch.setattr(c.session, "request",
+                            lambda *a, **k: _FakeResponse(200, payload))
+        return c
+
+    def test_real_fill_reports_the_actual_fee(self, monkeypatch):
+        c = self._client(monkeypatch, {"fills": [REAL_FILL]})
+        fills = c.get_fills()
+        assert len(fills) == 1
+        f = fills[0]
+        assert f.contracts == 4
+        assert f.price == 49  # yes side -> yes_price_dollars
+        assert f.taker_fee_cents == 7  # was silently 0 before the fee_cost fix
+
+    def test_fee_cost_missing_falls_back_to_zero(self, monkeypatch):
+        no_fee = {k: v for k, v in REAL_FILL.items() if k != "fee_cost"}
+        c = self._client(monkeypatch, {"fills": [no_fee]})
+        assert c.get_fills()[0].taker_fee_cents == 0
+
+    def test_legacy_taker_fees_dollars_still_read_as_fallback(self, monkeypatch):
+        legacy = {k: v for k, v in REAL_FILL.items() if k != "fee_cost"}
+        legacy["taker_fees_dollars"] = "0.070000"
+        c = self._client(monkeypatch, {"fills": [legacy]})
+        assert c.get_fills()[0].taker_fee_cents == 7

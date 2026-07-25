@@ -327,7 +327,15 @@ class KalshiClient:
                 side=f.get("side", "yes"), action=f.get("action", "buy"),
                 contracts=int(float(f.get("count_fp", f.get("count", 0)))),
                 price=price,
-                taker_fee_cents=abs(dollars_to_cents(f.get("taker_fees_dollars", "0") or "0")),
+                # Live fill payloads carry the fee as `fee_cost` (dollar string,
+                # sibling to yes/no_price_dollars) — NOT `taker_fees_dollars`,
+                # which only exists on the *order* object (_order_result). Reading
+                # the wrong key silently left taker_fee_cents=0, dropping real fees
+                # from the ledger's cost basis and P&L (verified live 2026-07-24;
+                # same class as the settlement revenue field fix). Fallback to the
+                # old key kept purely for safety.
+                taker_fee_cents=abs(dollars_to_cents(
+                    f.get("fee_cost", f.get("taker_fees_dollars", "0")) or "0")),
                 ts=datetime.fromisoformat(f["created_time"].replace("Z", "+00:00"))
                 if f.get("created_time") else datetime.now(timezone.utc),
                 raw=f,
