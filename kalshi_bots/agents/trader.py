@@ -20,7 +20,7 @@ from kalshi_bots.skills.fair_value_model import evaluate, side_edges
 from kalshi_bots.skills.kalshi_client import depth_within
 from kalshi_bots.skills.risk_management import (
     DEPTH_COLLAPSE_FRACTION, ENTRY_PHASES, EXIT_EDGE_CENTS, MIN_DEPTH_WITHIN_5C,
-    MIN_EDGE_CENTS, SIGMA_PLAUSIBLE_MAX, SIGMA_PLAUSIBLE_MIN,
+    MIN_EDGE_CENTS, SIGMA_PLAUSIBLE_MAX, SIGMA_PLAUSIBLE_MIN, STOP_LOSS_PCT,
 )
 from kalshi_bots.skills.skill_matcher import SkillMatcher
 from kalshi_bots.skills.window_monitor import (
@@ -32,6 +32,11 @@ from kalshi_bots.types import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _usd(cents: float) -> str:
+    sign = "-" if cents < 0 else ""
+    return f"{sign}${abs(cents) / 100:.2f}"
 
 
 class Trader:
@@ -177,11 +182,13 @@ class Trader:
             return f"declined:entry_verification_failed({','.join(failed)})"
 
         depth = depth_within(snapshot, side, 2)
+        recent_move_pct = self.feed.recent_move_pct() if self.feed else None
         sizing = self.risk.size(SizingRequest(
             skill_name=best.skill_name, market=market, side=side,
             entry_price=price, model_prob=model_prob,
             book_depth_at_entry=depth, signal=signal,
-            event_id=window.event_ticker, is_live=True))
+            event_id=window.event_ticker, is_live=True,
+            recent_move_pct=recent_move_pct))
         if sizing.contracts == 0:
             return f"declined:sized_zero({','.join(sizing.capped_by)})"
 
@@ -221,10 +228,12 @@ class Trader:
         edge_cents = model_prob * 100 - fill_price
         partial = " (partial)" if order.filled_contracts < sizing.contracts else ""
         self.discord.notify(
-            f"ENTRY [{best.skill_name}] {side.upper()} {order.filled_contracts}x"
-            f"{partial} {market.market_ticker} @ {fill_price}c "
-            f"(fee {order.fee_cents}c, model_prob={model_prob:.2f}, "
-            f"edge≈{edge_cents:.1f}c)", level="info")
+            f"🟢 **ENTRY** — {best.skill_name}\n"
+            f"Side: **{side.upper()}** | Market: `{market.market_ticker}`\n"
+            f"Filled: {order.filled_contracts}x{partial} @ {fill_price}c "
+            f"(fee {order.fee_cents}c)\n"
+            f"Model prob: {model_prob:.2f} | Edge: ≈{edge_cents:.1f}c",
+            level="info")
         self._write_trade_note(coid, best.skill_name, market, side, order,
                                price, model_prob, conditions, signal, window,
                                sigma=sigma, spot=spot.mid)
@@ -301,13 +310,21 @@ class Trader:
             if order.filled_contracts > 0:
                 fills = [f for f in self.broker.get_fills(market.market_ticker)
                          if f.order_id == order.order_id]
+                pnl = None
                 if fills:
-                    self.risk.on_exit(fills[-1], market, t["skill"])
-                pnl = (order.avg_fill_price - t["entry_price"]) * order.filled_contracts
+                    pnl = self.risk.on_exit(fills[-1], market, t["skill"])
+                if pnl is None:
+                    # no ledger position to draw fee-inclusive basis from
+                    # (e.g. a restored trade the ledger never saw) — fall back
+                    # to the fee-blind estimate rather than losing the note.
+                    pnl = (order.avg_fill_price - t["entry_price"]) * order.filled_contracts
                 self._close_trade_note(t["note"], reason, order.avg_fill_price, pnl)
+                result_icon = "🟢" if pnl >= 0 else "🔴"
                 self.discord.notify(
-                    f"EXIT [{t['skill']}] {market.market_ticker} {reason}: "
-                    f"{order.filled_contracts}x @ {order.avg_fill_price}c", "info")
+                    f"{result_icon} **EXIT** — {t['skill']} ({reason})\n"
+                    f"Side: **{t['side'].upper()}** | Market: `{market.market_ticker}`\n"
+                    f"Filled: {order.filled_contracts}x @ {order.avg_fill_price}c\n"
+                    f"Net P&L: **{_usd(pnl)}**", "info")
                 self.open_trades.pop(coid, None)
                 actions.append(f"exited:{coid}:{reason}")
         return actions
@@ -315,13 +332,25 @@ class Trader:
     def _exit_reason(self, t: dict, now: datetime) -> str | None:
         """Skill-note invalidation/exit rules, evaluated on fresh data.
         Ordering matters: the universal near-close rule fires first (no skill
-        holds into settlement noise), then thesis/health rules."""
+        holds into settlement noise), then the universal stop-loss (applies
+        to every open position regardless of skill — a hard backstop
+        independent of any skill's own thesis), then per-skill thesis/health
+        rules."""
         window: WindowRef | None = t.get("window")
         if window is not None and window_phase(now, window) in ("near_close", "settled"):
             return "near_close_exit"
+
+        snapshot = self._book_snapshot(t["market_ticker"])
+        if snapshot is not None:
+            bid = snapshot.yes_bid if t["side"] == "yes" else snapshot.no_bid
+            if bid is not None and t["entry_price"] > 0:
+                loss_pct = 100 * (t["entry_price"] - bid) / t["entry_price"]
+                if loss_pct >= STOP_LOSS_PCT:
+                    return "stop_loss"
+
         if t.get("skill") != "btc-15min-fair-value" or window is None \
                 or window.strike is None:
-            return None  # only the near-close rule applies
+            return None  # only the near-close/stop-loss rules apply
         if self.feed is None:
             return None  # no model inputs: near-close will still catch it
         spot = self.feed.current_composite()
@@ -330,7 +359,6 @@ class Trader:
             # skill note invalidation: constituents dropped / vol unavailable
             # -> never hold a model-driven position blind
             return "feed_loss"
-        snapshot = self._book_snapshot(t["market_ticker"])
         if snapshot is None:
             return None  # nothing to exit into anyway; retry next tick
         yes_d = depth_within(snapshot, "yes", 5)

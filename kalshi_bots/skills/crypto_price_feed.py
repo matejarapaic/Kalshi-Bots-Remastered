@@ -50,6 +50,7 @@ MIN_VOL_COVERAGE = 0.5           # samples must span >= half the window
 MAX_SAMPLES = 3700               # deque bound: 3600s window + slack
 SECONDS_PER_YEAR = 31_536_000    # 365d; tau uses the same base in fair-value
 RECONNECT_MAX_BACKOFF_S = 30.0
+VELOCITY_WINDOW_S = 60           # short window for "how fast is spot moving right now"
 
 
 class CryptoPriceFeedError(Exception):
@@ -390,6 +391,29 @@ class CryptoPriceFeed:
         if len(rets) < need - 1:
             return None
         return float(np.std(np.asarray(rets)) * math.sqrt(SECONDS_PER_YEAR))
+
+    def recent_move_pct(self, window_s: float = VELOCITY_WINDOW_S,
+                       mono: float | None = None) -> float | None:
+        """Signed fractional change in the composite mid over the trailing
+        window_s (e.g. 0.006 = spot up 0.6% in the last minute). None
+        (fail-closed) if the feed has stalled or the sample buffer doesn't
+        yet cover the full window — used to detect a fast-moving spot so
+        sizing can lean smaller into a move that may be gapping past the
+        model's assumptions rather than confirming a stable mispricing."""
+        mono = time.monotonic() if mono is None else mono
+        with self._lock:
+            samples = list(self._samples)
+        if not samples:
+            return None
+        latest_t, latest_p = samples[-1]
+        if mono - latest_t > SAMPLE_INTERVAL_S * 2:
+            return None  # feed stalled — don't compute off a stale reading
+        if samples[0][0] > mono - window_s:
+            return None  # not enough history yet to cover the window
+        baseline_p = next(p for t, p in samples if t >= mono - window_s)
+        if baseline_p == 0:
+            return None
+        return (latest_p - baseline_p) / baseline_p
 
     def health(self, mono: float | None = None) -> FeedHealth:
         mono = time.monotonic() if mono is None else mono

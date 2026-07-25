@@ -56,8 +56,9 @@ def signal(sig_type="fair-value-candidate", ticker=TICKER, w=None):
 
 
 class FakeFeed:
-    def __init__(self, mid=66000.0, sigma=0.6, healthy=5):
+    def __init__(self, mid=66000.0, sigma=0.6, healthy=5, move_pct=None):
         self.mid, self.sigma, self.healthy = mid, sigma, healthy
+        self.move_pct = move_pct
 
     def current_composite(self):
         if self.mid is None:
@@ -68,6 +69,9 @@ class FakeFeed:
 
     def realized_vol(self, window_s=900):
         return self.sigma
+
+    def recent_move_pct(self, window_s=60):
+        return self.move_pct
 
 
 class FakeBook:
@@ -306,6 +310,28 @@ class TestExitRules:
         t.feed = FakeFeed(mid=None)  # would be feed_loss, but near_close first
         near = NOW + timedelta(seconds=500)  # window closes at NOW+600
         assert self.exit_reason(t, now=near) == "near_close_exit"
+
+    def test_stop_loss_exits_on_large_unrealized_loss(self, vault):
+        t = self.open_position(vault)
+        # entered yes @ 55c; book now shows yes_bid collapsed to 19c, a ~65%
+        # unrealized loss vs entry -- past the 50% STOP_LOSS_PCT backstop
+        t.book = FakeBook(snapshot(yes_ask=81, no_ask=81))
+        assert self.exit_reason(t) == "stop_loss"
+
+    def test_stop_loss_is_universal_even_for_non_fair_value_skills(self, vault):
+        # a skill with no thesis-invalidation rules of its own (only
+        # near_close/stop_loss apply) still gets the stop-loss backstop
+        t = self.open_position(vault)
+        (coid, trade), = t.open_trades.items()
+        trade["skill"] = "btc-15min-vol-spike"
+        t.book = FakeBook(snapshot(yes_ask=81, no_ask=81))
+        assert t._exit_reason(trade, NOW) == "stop_loss"
+
+    def test_no_stop_loss_within_threshold(self, vault):
+        t = self.open_position(vault)
+        # entered yes @ 55c; bid at 30c is only a ~45% loss -- under 50%
+        t.book = FakeBook(snapshot(yes_ask=70, no_ask=70))
+        assert self.exit_reason(t) is None
 
     def test_manage_positions_executes_exit(self, vault):
         broker = FakeBroker()

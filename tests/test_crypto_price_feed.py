@@ -6,6 +6,8 @@ with explicit clocks — no WebSocket connections, per testing conventions.
 import math
 from datetime import datetime, timezone
 
+import pytest
+
 from kalshi_bots.skills.crypto_price_feed import (
     MIN_HEALTHY_CONSTITUENTS, SECONDS_PER_YEAR, STALE_CONSTITUENT_S,
     ConstituentSpec, CryptoPriceFeed, weighted_median,
@@ -187,6 +189,48 @@ class TestRealizedVol:
         tick_all(feed, {"a": 66000.0}, mono=0.0)  # 1 healthy < 2 -> None
         feed._sample_once(mono=0.0, wall=datetime.now(UTC))
         assert len(feed._samples) == 0
+
+
+class TestRecentMovePct:
+    def make_sampled_feed(self, log_returns, dt=1.0, p0=66000.0):
+        feed = make_feed(["a", "b"])
+        t, p = 0.0, p0
+        tick_all(feed, {"a": p, "b": p}, mono=t)
+        feed._sample_once(mono=t, wall=datetime.now(UTC))
+        for r in log_returns:
+            t += dt
+            p *= math.exp(r)
+            tick_all(feed, {"a": p, "b": p}, mono=t)
+            feed._sample_once(mono=t, wall=datetime.now(UTC))
+        return feed, t
+
+    def test_flat_price_is_zero_move(self):
+        feed, t_end = self.make_sampled_feed([0.0] * 60)
+        assert feed.recent_move_pct(window_s=60, mono=t_end) == pytest.approx(0.0)
+
+    def test_signed_move_matches_hand_computed_pct(self):
+        # 60 steps of +0.01% each ~= +0.6% total move over the window
+        r = 1e-4
+        feed, t_end = self.make_sampled_feed([r] * 60)
+        move = feed.recent_move_pct(window_s=60, mono=t_end)
+        expected = math.exp(r * 60) - 1
+        assert move == pytest.approx(expected, rel=1e-6)
+
+    def test_downward_move_is_negative(self):
+        r = -1e-4
+        feed, t_end = self.make_sampled_feed([r] * 60)
+        move = feed.recent_move_pct(window_s=60, mono=t_end)
+        assert move < 0
+
+    def test_insufficient_history_returns_none(self):
+        # only 10s of samples cannot answer for a 60s window
+        feed, t_end = self.make_sampled_feed([1e-4] * 10)
+        assert feed.recent_move_pct(window_s=60, mono=t_end) is None
+
+    def test_stalled_feed_returns_none(self):
+        feed, t_end = self.make_sampled_feed([1e-4] * 60)
+        # asking long after the last sample -> feed considered stalled
+        assert feed.recent_move_pct(window_s=60, mono=t_end + 30.0) is None
 
 
 class TestMemoryBounds:

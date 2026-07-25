@@ -40,7 +40,7 @@ def market(ticker="KXBTC15M-26JUL222130-30"):
 
 def req(skill="btc-15min-fair-value", price=60, prob=0.68, depth=1000,
         eid="KXBTC15M-26JUL222130", ticker="KXBTC15M-26JUL222130-30",
-        is_live=True):
+        is_live=True, recent_move_pct=None):
     window = WindowRef(series_ticker="KXBTC15M", event_ticker=eid,
                        market_ticker=ticker,
                        opens_at=NOW, closes_at=NOW, strike=66010.86)
@@ -51,7 +51,8 @@ def req(skill="btc-15min-fair-value", price=60, prob=0.68, depth=1000,
     return SizingRequest(skill_name=skill, market=market(ticker),
                          side="yes", entry_price=price, model_prob=prob,
                          book_depth_at_entry=depth, signal=sig,
-                         event_id=eid, is_live=is_live)
+                         event_id=eid, is_live=is_live,
+                         recent_move_pct=recent_move_pct)
 
 
 def fill(contracts, price, fee=0, side="yes", action="buy"):
@@ -198,6 +199,29 @@ class TestCaps:
         # depth cap allows 0.25*100 = 25
         assert r.contracts == 25
         assert "depth_gate" in r.capped_by
+
+    def test_velocity_scale_halves_a_fast_move(self, rm_uncapped):
+        # a 0.6% recent move breaches the 0.4% threshold -> fraction halved,
+        # so the fair-value worked example's 40 contracts becomes ~20
+        r = rm_uncapped.size(req(recent_move_pct=0.006))
+        assert "velocity_scale" in r.capped_by
+        assert r.contracts == 20
+
+    def test_velocity_scale_ignores_a_slow_move(self, rm_uncapped):
+        r = rm_uncapped.size(req(recent_move_pct=0.001))
+        assert "velocity_scale" not in r.capped_by
+        assert r.contracts == 40
+
+    def test_velocity_scale_is_direction_agnostic(self, rm_uncapped):
+        # a fast move DOWN scales sizing the same as a fast move up
+        r = rm_uncapped.size(req(recent_move_pct=-0.006))
+        assert "velocity_scale" in r.capped_by
+        assert r.contracts == 20
+
+    def test_velocity_scale_skipped_when_unavailable(self, rm_uncapped):
+        r = rm_uncapped.size(req(recent_move_pct=None))
+        assert "velocity_scale" not in r.capped_by
+        assert r.contracts == 40
 
 
 class TestHalts:
