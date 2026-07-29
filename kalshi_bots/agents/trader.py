@@ -16,11 +16,14 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from kalshi_bots.skills.fair_value_model import evaluate, side_edges
+from kalshi_bots.skills.fair_value_model import (
+    evaluate, moneyness_sigmas, side_edges,
+)
 from kalshi_bots.skills.kalshi_client import depth_within
 from kalshi_bots.skills.risk_management import (
-    DEPTH_COLLAPSE_FRACTION, ENTRY_PHASES, EXIT_EDGE_CENTS, MIN_DEPTH_WITHIN_5C,
-    MIN_EDGE_CENTS, SIGMA_PLAUSIBLE_MAX, SIGMA_PLAUSIBLE_MIN, STOP_LOSS_PCT,
+    ATM_MIN_SIGMA_DISTANCE, DEPTH_COLLAPSE_FRACTION, ENTRY_PHASES,
+    EXIT_EDGE_CENTS, MIN_DEPTH_WITHIN_5C, SIGMA_PLAUSIBLE_MAX,
+    SIGMA_PLAUSIBLE_MIN, STOP_LOSS_PCT, required_edge_cents,
 )
 from kalshi_bots.skills.skill_matcher import SkillMatcher
 from kalshi_bots.skills.window_monitor import (
@@ -260,14 +263,22 @@ class Trader:
             side = "yes" if (edges["yes"] if edges["yes"] is not None else -999) \
                 >= (edges["no"] if edges["no"] is not None else -999) else "no"
             edge = edges[side]
-            c["edge_ge_min"] = edge is not None and edge >= MIN_EDGE_CENTS
+            price = snapshot.yes_ask if side == "yes" else snapshot.no_ask
+            # fee-aware edge floor: the modeled edge must clear round-trip
+            # taker fees + slippage, not merely the flat MIN_EDGE_CENTS. Fees
+            # peak at the money, exactly where thin edges are least reliable.
+            min_edge = required_edge_cents(price) if price is not None else MIN_EDGE_CENTS
+            c["edge_ge_min"] = edge is not None and edge >= min_edge
+            # at-the-money guard: refuse coin-flips where a few dollars of spot
+            # noise flips the model's answer (2026-07-24 postmortem: the losers
+            # clustered here). moneyness in settlement-distribution stddevs.
+            c["not_at_the_money"] = moneyness_sigmas(est) >= ATM_MIN_SIGMA_DISTANCE
             c["phase_allowed"] = window_phase(now, window) in ENTRY_PHASES
             c["depth_both_sides"] = (
                 depth_within(snapshot, "yes", 5) >= MIN_DEPTH_WITHIN_5C
                 and depth_within(snapshot, "no", 5) >= MIN_DEPTH_WITHIN_5C)
             c["spot_healthy"] = spot.constituents_healthy >= 2
             c["sigma_plausible"] = SIGMA_PLAUSIBLE_MIN <= sigma <= SIGMA_PLAUSIBLE_MAX
-            price = snapshot.yes_ask if side == "yes" else snapshot.no_ask
             c["ask_available"] = price is not None
             model_prob = (est.model_prob_up if side == "yes"
                           else est.model_prob_down)

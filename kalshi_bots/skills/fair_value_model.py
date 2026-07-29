@@ -85,6 +85,23 @@ def evaluate(window: WindowRef, spot: CompositeSpot,
     )
 
 
+def moneyness_sigmas(est: FairValueEstimate) -> float:
+    """How far the strike sits from spot, measured in standard deviations of
+    the settlement distribution: |ln(spot/strike)| / (sigma * sqrt(tau)).
+
+    This is the magnitude of the z-score that feeds p_up (p_up = Phi(z)), so
+    0.0 == at-the-money (a coin flip; p_up == 0.5) and larger values mean the
+    model has real directional conviction. Returns +inf for a degenerate
+    (settled / zero-vol) distribution, where the outcome is deterministic
+    rather than a coin flip. Callers gate near-ATM entries on this because the
+    drift-zero model is most fragile at the money — a few dollars of spot
+    noise flips the answer (see the 2026-07-24 live-session postmortem)."""
+    tau = est.time_remaining_s / SECONDS_PER_YEAR
+    if est.sigma_used <= 0 or tau <= 0 or est.spot_used <= 0 or est.strike <= 0:
+        return float("inf")
+    return abs(math.log(est.spot_used / est.strike) / (est.sigma_used * math.sqrt(tau)))
+
+
 def side_edges(est: FairValueEstimate,
                book: OrderbookSnapshot | None) -> dict[str, float | None]:
     """Signed edge (model cents minus that side's ask) for both sides.

@@ -59,6 +59,16 @@ DEPTH_COLLAPSE_FRACTION = 0.5      # exit when either side falls below
                                    # MIN_DEPTH_WITHIN_5C * this
 ENTRY_PHASES = ("midpoint",)       # no entries in opening (strike/book still
                                    # settling) or near_close (gamma dominates)
+# PROPOSED 2026-07-24: P1 quality gates from the first live-session postmortem
+# (04-trade-history/postmortems/2026-07-24-KXBTC15M.md). That session's losers
+# clustered on near-ATM coin-flips whose thin modeled edge did not survive
+# round-trip taker fees. Both awaiting owner sign-off — validate over the next
+# live sample before promoting to CONFIRMED.
+ATM_MIN_SIGMA_DISTANCE = 0.5       # decline entries where the strike is within
+                                   # this many settlement-distribution stddevs
+                                   # of spot (model is a coin flip at the money)
+ENTRY_EDGE_SLIPPAGE_CENTS = 1      # buffer added on top of round-trip taker
+                                   # fees when deriving the fee-aware min edge
 # PROPOSED 2026-07-24: universal hard risk backstop, independent of any
 # skill's own thesis-invalidation exits — applies to every open position
 # regardless of skill. Fires when the position's current mark-to-market
@@ -93,6 +103,20 @@ class RiskError(Exception):
 
 class RiskUnknownSkill(RiskError):
     pass
+
+
+def required_edge_cents(entry_price_cents: int) -> int:
+    """Fee-aware minimum modeled edge to enter: the larger of the flat
+    MIN_EDGE_CENTS floor and round-trip taker fees plus a slippage buffer.
+
+    Round-trip = entry taker fee + exit taker fee; est_fee_cents is per-side
+    per the quadratic schedule (highest at the money — exactly where the
+    2026-07-24 session's losers clustered), so a 4c 'edge' on a 50c coin flip
+    that costs ~5c round-trip is correctly rejected as negative-EV. Uses the
+    single-contract fee as the per-contract proxy (a slight, deliberate
+    overestimate — the per-order ceil is shared across contracts)."""
+    round_trip_fee = 2 * est_fee_cents(1, entry_price_cents)
+    return max(MIN_EDGE_CENTS, round_trip_fee + ENTRY_EDGE_SLIPPAGE_CENTS)
 
 
 def kelly_fraction(p: float, c: int) -> float:

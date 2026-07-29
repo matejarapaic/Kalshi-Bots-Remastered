@@ -19,6 +19,7 @@ halted() -> tuple[bool, str | None]               # (halted, reason)
 set_halt(on: bool, reason: str, caller: str) -> None
 reconcile() -> bool                               # startup: live vs ledger, self-heals settled-while-down
 kelly_fraction(p: Prob, c: Cents) -> float        # module-level: full-Kelly f* for a binary at c cents
+required_edge_cents(entry_price_cents: int) -> int  # module-level: fee-aware entry-edge floor
 ```
 
 Exceptions: `RiskError` (base — infra only: balance fetch failed), `RiskUnknownSkill`. An unreadable or absent ledger note at startup is a fresh ledger, not an error.
@@ -43,7 +44,7 @@ Implemented as module-level constants in `kalshi_bots/skills/risk_management.py`
 | `PER_TRADE_CAP_PCT["btc-15min-vol-spike"]` | 3 | |
 | `SKILL_MIN_DEPTH` (all three skills) | 100 | absolute depth minimum: contracts within 2¢ of entry, per skill note |
 | `MAX_CONTRACTS_PER_WINDOW` | 20 | hard contract cap per 15-min window — draft-skill training wheels |
-| `MIN_EDGE_CENTS` | 4 | fair-value entry: model-vs-ask divergence required (trader + monitor read it here) |
+| `MIN_EDGE_CENTS` | 4 | fair-value entry: flat model-vs-ask divergence floor. The monitor reads it directly to flag candidates; the trader enters against the fee-aware `required_edge_cents(price)` (≥ this floor) instead — see the 2026-07-24 P1 block below |
 | `EXIT_EDGE_CENTS` | 1 | fair-value exit: held-side edge at/below this = thesis played out |
 | `SIGMA_PLAUSIBLE_MIN/MAX` | 0.20 / 2.00 | annualized vol band outside which the model is not trusted |
 | `MIN_DEPTH_WITHIN_5C` | 100 | entry gate: contracts within 5¢, each side |
@@ -54,6 +55,14 @@ Implemented as module-level constants in `kalshi_bots/skills/risk_management.py`
 | Name | Value | Meaning |
 |---|---|---|
 | `STOP_LOSS_PCT` | 50 | exit any open position, any skill, once its current mark-to-market value has fallen to this fraction (%) of entry cost — checked in `Trader._exit_reason` before per-skill rules |
+
+### PROPOSED 2026-07-24 (P1 entry-quality gates from the first live-session postmortem — its losers clustered on near-ATM coin-flips whose thin edge did not survive round-trip taker fees; awaiting owner sign-off — validate over the next live sample before promoting)
+| Name | Value | Meaning |
+|---|---|---|
+| `ATM_MIN_SIGMA_DISTANCE` | 0.5 | fair-value entry: decline when `fair_value_model.moneyness_sigmas` < this — the strike is within half a settlement-distribution stddev of spot (a coin flip). Surfaces as the `not_at_the_money` entry condition |
+| `ENTRY_EDGE_SLIPPAGE_CENTS` | 1 | buffer added on top of round-trip taker fees by `required_edge_cents` |
+
+`required_edge_cents(entry_price_cents) -> int` returns the fee-aware entry-edge floor: `max(MIN_EDGE_CENTS, 2·est_fee_cents(1, price) + ENTRY_EDGE_SLIPPAGE_CENTS)`. The trader uses it in place of the flat `MIN_EDGE_CENTS`, so the modeled edge must clear round-trip taker fees (which peak at the money) plus slippage, not merely 4¢.
 
 ### PROPOSED 2026-07-22 (values carried unchanged from the owner-confirmed 2026-07-17 Phase-2 "tighter variant" checkpoint; re-scoped per-event for crypto windows, pending owner re-confirmation for this market family)
 | Name | Value | Meaning |
