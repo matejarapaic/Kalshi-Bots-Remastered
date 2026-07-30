@@ -62,8 +62,9 @@ def live_trading_guard(vault, argv: list[str] | None = None,
          matcher's own gate independently).
     Any single missing -> SystemExit with a clear message. Even a full pass
     only *permits* startup: KalshiClient still refuses prod without
-    KALSHI_ALLOW_PROD=yes-i-mean-it, and DiscordBot refuses autonomous on
-    prod, so live trading is manual-approve by construction.
+    KALSHI_ALLOW_PROD=yes-i-mean-it. Execution mode after the guard is
+    autonomous on demo and prod alike (owner decision 2026-07-22 — no
+    per-trade approval step; exits were never approval-gated).
     """
     env = os.environ.get("KALSHI_ENV", "demo")
     if env == "demo":
@@ -92,7 +93,8 @@ def live_trading_guard(vault, argv: list[str] | None = None,
             "in the vault. Draft skills never trade live money — confirm one "
             "after >=30 settled demo samples and an owner review.")
     log.warning("LIVE TRADING GUARD PASSED: %d confirmed skill(s); execution "
-                "will be manual-approve (autonomous is demo-only)", len(notes))
+                "is AUTONOMOUS — no per-trade approval (owner decision "
+                "2026-07-22)", len(notes))
     return "live"
 
 
@@ -107,7 +109,7 @@ class Orchestrator:
         self.vault = vault or Vault()
         # paper-first: demo passes straight through; prod demands the full
         # three-gate flow (flag + typed confirmation + confirmed skill) and
-        # even then remains manual-approve + KALSHI_ALLOW_PROD-gated
+        # remains KALSHI_ALLOW_PROD-gated in the client
         self.mode = live_trading_guard(self.vault)
         env = os.environ.get("KALSHI_ENV", "demo")
         self.kalshi = KalshiClient()
@@ -128,11 +130,6 @@ class Orchestrator:
             self.risk.reconcile()
         except Exception as e:
             log.warning("startup ledger reconcile skipped: %s", e)
-        # Execution mode, owner-decided 2026-07-17: AUTONOMOUS ON DEMO ONLY.
-        # This orchestrator refuses non-demo envs at startup (above), and
-        # DiscordBot separately refuses autonomous+prod — flipping to prod
-        # requires re-answering the execution-mode question.
-        #
         # Transport cascade: GatewayTransport (full — sends + receives slash
         # commands/button clicks) > DiscordTransport (REST, send-only, if the
         # gateway can't connect) > ConsoleTransport (local log only).
