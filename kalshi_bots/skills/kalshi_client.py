@@ -162,24 +162,33 @@ def settled_trade_summary(s: Settlement) -> dict:
     settlement (settled flat).
 
     Money columns use Kalshi's own reported figures:
-      payout      = revenue (net directional settlement payout)
+      payout      = matched-pair redemptions + directional revenue: every
+                    min(yes,no) pair of contracts redeems for 100c the moment
+                    the sides net (this is how closing a position works on
+                    Kalshi — the "close" is a buy of the opposite side), and
+                    the surviving net position pays `revenue` at settlement
       total cost  = yes+no traded cost + fees  (Kalshi "Total cost")
       return      = payout - total cost;  % over cost
     Exact vs Kalshi for hold-to-settlement trades (validated against a live
-    row: 5 NO, $5 payout, $3.39 cost, +$1.61/48%). For positions CLOSED before
-    settlement the pre-settlement sell proceeds are not in this payload, so the
-    return reads more negative than the realized P&L — the fills feed that
-    would correct it is not retained long enough to trust."""
+    row: 5 NO, $5 payout, $3.39 cost, +$1.61/48%) AND for buy-only closed
+    positions (validated 2026-07-30 against the 2026-07-29 live session:
+    reproduces the account's true cash flow to the cent on all three
+    windows). Caveat: a position reduced by a *direct sell* of the same side
+    books its proceeds outside this payload — the bot never does that (its
+    exits are opposite-side buys via the v2 bid/ask mapping), so bot rows are
+    exact; hand-traded rows with direct sells may read low."""
     net = s.yes_count - s.no_count
-    ret = s.revenue_cents - s.total_cost_cents
+    pairs = min(s.yes_count, s.no_count)
+    payout = round(pairs * 100) + s.revenue_cents
+    ret = payout - s.total_cost_cents
     return {
         "market_ticker": s.market_ticker,
         "event_ticker": s.event_ticker,
         "outcome": s.result,
         "position_count": abs(net),
         "position_side": "yes" if net >= 0 else "no",
-        "closed_early": abs(net) < 1e-9,          # settled flat -> return is a floor
-        "payout_cents": s.revenue_cents,          # Kalshi "Settlement payout"
+        "closed_early": abs(net) < 1e-9,          # settled flat (netted out pre-close)
+        "payout_cents": payout,                   # pair redemptions + settlement payout
         "total_cost_cents": s.total_cost_cents,
         "return_cents": ret,
         "return_pct": (100.0 * ret / s.total_cost_cents) if s.total_cost_cents else 0.0,

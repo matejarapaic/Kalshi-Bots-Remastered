@@ -77,8 +77,10 @@ class TestSettlementParsing:
     def test_final_position_is_net_of_both_sides(self):
         row = settled_trade_summary(_parse_settlement(self.NETTED))
         assert row["position_side"] == "no" and row["position_count"] == 4  # 6 - 2
-        assert row["payout_cents"] == 400
+        # 2 matched pairs redeemed 200 when the sides netted + 400 settlement
+        assert row["payout_cents"] == 600
         assert row["total_cost_cents"] == 372        # 25 + 336 + 11
+        assert row["return_cents"] == 228            # true realized, not 400-372
 
     def test_loser_full_loss(self):
         row = settled_trade_summary(_parse_settlement(self.LOSER))
@@ -87,8 +89,8 @@ class TestSettlementParsing:
         assert row["return_cents"] == -114 and round(row["return_pct"]) == -100
 
     # position CLOSED before settlement: bought 3 YES and offset with 3 NO, so
-    # net 0 -> settled flat. The pre-settlement sell proceeds are not in the
-    # settlement payload, so the return is a floor (reads worse than realized).
+    # net 0 -> settled flat. The 3 matched pairs redeemed 100c each at netting
+    # time, so the true realized result IS derivable from this payload.
     CLOSED_EARLY = {
         "ticker": "KXBTC15M-26JUL241315-15", "market_result": "no",
         "yes_count_fp": "3.00", "no_count_fp": "3.00",
@@ -96,12 +98,33 @@ class TestSettlementParsing:
         "fee_cost": "0.102000", "revenue": 0,
     }
 
-    def test_closed_early_is_flagged_and_return_is_a_floor(self):
+    def test_closed_early_is_flagged_and_return_is_exact(self):
+        """Regression: this used to report -313 (a '-100%' floor that ignored
+        the pair redemptions) — the dashboard showed every closed trade as a
+        total loss."""
         row = settled_trade_summary(_parse_settlement(self.CLOSED_EARLY))
         assert row["position_count"] == 0 and row["closed_early"] is True
-        assert row["payout_cents"] == 0
+        assert row["payout_cents"] == 300            # 3 pairs redeemed at netting
         assert row["total_cost_cents"] == 313        # 177 + 126 + 10
-        assert row["return_cents"] == -313           # settlement-only floor
+        assert row["return_cents"] == -13            # true realized P&L
+
+    # captured live 2026-07-30: the 2026-07-29 session's third window. The
+    # true realized loss (verified against the account's own fill-by-fill
+    # cash flow) is -102c; the old floor math showed -1202c / -100%.
+    REAL_CLOSED_2026_07_29 = {
+        "event_ticker": "KXBTC15M-26JUL290100", "ticker": "KXBTC15M-26JUL290100-00",
+        "market_result": "yes", "yes_count_fp": "11.00", "no_count_fp": "11.00",
+        "yes_total_cost_dollars": "6.940000", "no_total_cost_dollars": "4.720000",
+        "fee_cost": "0.355900", "revenue": 0, "value": 100,
+        "settled_time": "2026-07-29T05:00:06.053189Z",
+    }
+
+    def test_real_closed_window_matches_verified_cash_flow(self):
+        row = settled_trade_summary(_parse_settlement(self.REAL_CLOSED_2026_07_29))
+        assert row["closed_early"] is True
+        assert row["payout_cents"] == 1100
+        assert row["total_cost_cents"] == 1202
+        assert row["return_cents"] == -102
 
 
 class TestDerivedAsks:

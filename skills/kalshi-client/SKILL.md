@@ -136,15 +136,20 @@ payout = `|yes_count - no_count| * 100` when the net side wins, else 0) — NOT 
 returned `revenue_cents=0` every time; reconcile never depended on it (it books
 from recorded cost basis and only reads `.result`), but `get_recent_settlements`
 does. `settled_trade_summary` mirrors Kalshi's History columns from the settlement
-payload alone: **final position = net of the two sides** (buying/selling the
-opposite side is how you close on Kalshi, so gross `yes_count`/`no_count`
-over-counts; net 0 => closed before settlement, `closed_early=True`), **total
-cost = yes+no trade cost + fees**, **return = payout − total cost**. Exact for
-hold-to-settlement trades (validated against a live row: 5 NO, $5 payout, $3.39
-cost, +$1.61/48%). Positions **closed before settlement** read more negative
-than realized: the pre-settlement sell proceeds live only in `/portfolio/fills`,
-and that feed AGES OUT within hours (ticker-filtered fills for markets more than
-~an hour old come back empty/partial), so a fills cash-flow reconstruction was
-tried and abandoned — it produced absurd returns (+11771%) on older rows. The
-settlement payload is authoritative and permanent; the dashboard flags
-`closed_early` rows rather than trust the fills feed.
+payload alone: **final position = net of the two sides** (buying the opposite
+side is how you close on Kalshi, so gross `yes_count`/`no_count` over-counts;
+net 0 => closed before settlement, `closed_early=True`), **payout =
+min(yes,no) matched pairs × 100c + `revenue`** (each netted pair redeems for
+$1 at netting time; the surviving net position pays `revenue` at settlement),
+**total cost = yes+no trade cost + fees**, **return = payout − total cost**.
+Exact for hold-to-settlement trades (validated against a live row: 5 NO, $5
+payout, $3.39 cost, +$1.61/48%) and for buy-only closed positions (validated
+2026-07-30: reproduces the 2026-07-29 session's true fill-by-fill cash flow
+to the cent on all three windows — the prior formula ignored pair
+redemptions and showed every closed trade as a −100% loss on the dashboard).
+Known limitation: a position reduced by a *direct same-side sell* books its
+proceeds outside the settlement payload, so such hand-traded rows read low —
+the bot never does this (its exits are opposite-side buys via the v2 bid/ask
+mapping). The fills feed can't correct it either: it AGES OUT within hours
+(a fills cash-flow reconstruction was tried and abandoned — +11771% on older
+rows). The settlement payload is authoritative and permanent.

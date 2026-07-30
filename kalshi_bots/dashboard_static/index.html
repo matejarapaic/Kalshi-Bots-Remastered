@@ -379,22 +379,19 @@ function renderTrades(list) {
     const oc = (t.outcome || "").toLowerCase();
     const side = (t.position_side || "").toLowerCase();
     // count 0 => the position was closed before settlement (settled flat).
-    // Its sell proceeds aren't in the settlement data, so the return is a
-    // floor (reads worse than realized) — mark it with † so it's not misread.
+    // Return is exact: matched yes/no pairs redeem 100c at netting time and
+    // the backend includes that in payout_cents.
     const closed = t.closed_early || t.position_count === 0;
     const posCell = closed
-      ? `<span class="chip">FLAT</span>`
+      ? `<span class="chip" title="Closed before settlement (netted flat)">FLAT</span>`
       : `${fmtQty(t.position_count)} <span class="chip ${side}">${side.toUpperCase()}</span>`;
-    const dagger = closed
-      ? ` <span title="Closed before settlement — return is a floor; pre-settlement sell proceeds aren't in Kalshi's settlement data" style="color:var(--text-muted);cursor:help">†</span>`
-      : "";
     return `<tr>` +
       `<td title="${t.market_ticker}">${t.market_ticker}</td>` +
       `<td><span class="chip ${oc}">${(t.outcome || "—").toUpperCase()}</span></td>` +
       `<td class="num">${posCell}</td>` +
       `<td class="num">${cents(t.payout_cents)}</td>` +
       `<td class="num">${cents(t.total_cost_cents)}</td>` +
-      `<td class="num ${cls}">${money} (${pct})${dagger}</td>` +
+      `<td class="num ${cls}">${money} (${pct})</td>` +
       `</tr>`;
   }).join("");
 }
