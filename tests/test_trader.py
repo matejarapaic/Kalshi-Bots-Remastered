@@ -96,19 +96,22 @@ class FakeBroker:
 
     def place_order(self, req):
         self.orders.append(req)
-        return OrderResult(order_id=f"o{len(self.orders)}", status="filled",
+        oid = f"o{len(self.orders)}"
+        return OrderResult(order_id=oid, status="filled",
                            filled_contracts=req.contracts,
                            avg_fill_price=req.limit_price + self.fill_price_bump,
-                           fee_cents=3, raw={})
+                           fee_cents=3, raw={"order_id": oid, "status": "filled"})
 
     def get_fills(self, ticker):
         if not self.orders:
             return []
         req = self.orders[-1]
-        return [Fill(order_id=f"o{len(self.orders)}", market_ticker=ticker,
+        oid = f"o{len(self.orders)}"
+        return [Fill(order_id=oid, market_ticker=ticker,
                      side=req.side, action=req.action, contracts=req.contracts,
                      price=req.limit_price, taker_fee_cents=3,
-                     ts=datetime.now(timezone.utc), raw={})]
+                     ts=datetime.now(timezone.utc),
+                     raw={"order_id": oid, "count": req.contracts})]
 
 
 class FakeRisk:
@@ -227,6 +230,13 @@ class TestEntryPath:
         assert note.frontmatter["status"] == "open"
         assert note.frontmatter["strike"] == 65900.0
         assert note.frontmatter["entry_conditions"]["edge_ge_min"] is True
+        # Kalshi-sourced fields, verbatim from the order/fill objects already
+        # fetched at entry — not recomputed, not dropped.
+        assert note.frontmatter["kalshi_order_id"] == "o1"
+        assert note.frontmatter["order_status"] == "filled"
+        assert note.frontmatter["entry_order_raw"] == {"order_id": "o1", "status": "filled"}
+        assert note.frontmatter["entry_fills_raw"] == [{"order_id": "o1", "count": 10}]
+        assert note.frontmatter["fill_ts"] is not None
 
     def test_small_edge_declined(self, vault):
         # ask 70 vs model ~71.9 -> edge ~1.9 < 4
@@ -337,6 +347,8 @@ class TestExitRules:
         broker = FakeBroker()
         risk = FakeRisk()
         t = self.open_position(vault, broker=broker, risk=risk)
+        (_, trade), = t.open_trades.items()
+        note_path = trade["note"]
         t.book = FakeBook(snapshot(yes_ask=71, no_ask=31))
         broker.snap = snapshot(yes_ask=71, no_ask=31)
         actions = t.manage_positions(now=NOW)
@@ -344,6 +356,73 @@ class TestExitRules:
         assert broker.orders[-1].action == "sell"
         assert risk.exits == [TICKER]
         assert t.open_trades == {}
+        # exit order/fill data — the same "already fetched, don't discard it"
+        # fields as the entry note, using the exit order's own id/status/raw.
+        note = vault.read_note(note_path)
+        # FakeBroker.orders stores the OrderRequest, not the OrderResult;
+        # its order_id is assigned as f"o{len(self.orders)}" (see FakeBroker
+        # .place_order) — the exit is the 2nd order placed (entry + exit).
+        exit_order_id = f"o{len(broker.orders)}"
+        assert note.frontmatter["exit_order_id"] == exit_order_id
+        assert note.frontmatter["exit_status"] == "filled"
+        assert note.frontmatter["exit_order_raw"] == {
+            "order_id": exit_order_id, "status": "filled"}
+        assert note.frontmatter["exit_fills_raw"] == [
+            {"order_id": exit_order_id, "count": trade["contracts"]}]
+        assert note.frontmatter["exit_fill_ts"] is not None
+
+
+class TestLedgerFromOrderResult:
+    """Regression from the 2026-07-29 live session: the exposure ledger was
+    updated from broker.get_fills(), which indexes asynchronously and often
+    returns nothing right after placement — so on_fill/on_exit silently
+    never ran, positions went stale, and every exit pnl fell back to the
+    fee-blind estimate. The ledger must be booked from the OrderResult the
+    trader already holds."""
+
+    class _LaggingBroker(FakeBroker):
+        def get_fills(self, ticker):
+            return []  # feed hasn't indexed the fill yet
+
+    class _CapturingRisk(FakeRisk):
+        def __init__(self):
+            super().__init__()
+            self.fill_objs, self.exit_objs = [], []
+
+        def on_fill(self, fill, market, skill, event_id=""):
+            self.fill_objs.append(fill)
+            super().on_fill(fill, market, skill, event_id)
+
+        def on_exit(self, fill, market, skill):
+            self.exit_objs.append(fill)
+            super().on_exit(fill, market, skill)
+            return 40
+
+    def test_entry_books_ledger_even_when_fills_feed_lags(self, vault):
+        broker, risk = self._LaggingBroker(), self._CapturingRisk()
+        t = make_trader(vault, broker=broker, risk=risk)
+        assert t.handle_signal(signal(), now=NOW).startswith("traded")
+        (f,) = risk.fill_objs
+        assert f.contracts == 10 and f.price == 55  # from the OrderResult
+        assert f.side == "yes" and f.taker_fee_cents == 3
+
+    def test_exit_books_ledger_even_when_fills_feed_lags(self, vault):
+        broker, risk = self._LaggingBroker(), self._CapturingRisk()
+        t = make_trader(vault, broker=broker, risk=risk)
+        assert t.handle_signal(signal(), now=NOW).startswith("traded")
+        (_, trade), = t.open_trades.items()
+        note_path = trade["note"]
+        t.book = FakeBook(snapshot(yes_ask=71, no_ask=31))
+        broker.snap = snapshot(yes_ask=71, no_ask=31)
+        actions = t.manage_positions(now=NOW)
+        assert len(actions) == 1
+        (f,) = risk.exit_objs
+        assert f.side == "yes" and f.action == "sell"
+        assert f.contracts == 10
+        # ledger pnl (fee-inclusive) lands in the note, not the fee-blind
+        # fallback estimate
+        note = vault.read_note(note_path)
+        assert note.frontmatter["realized_pnl_cents"] == 40
 
 
 def write_open_trade(vault, ticker=TICKER, coid="kb-abc123"):
@@ -372,11 +451,23 @@ class TestRestartRecovery:
     def test_closes_settled_while_down(self, vault):
         write_open_trade(vault)
         t = make_trader(vault)
-        settled = {TICKER: Settlement(market_ticker=TICKER, result="yes",
-                                      settled_ts=NOW, revenue_cents=0, raw={})}
+        settled = {TICKER: Settlement(
+            market_ticker=TICKER, result="yes", settled_ts=NOW,
+            revenue_cents=1000, raw={"ticker": TICKER, "market_result": "yes"},
+            event_ticker="KXBTC15M-26JUL222130", yes_count=10.0, no_count=0.0,
+            fee_cents=5, total_cost_cents=525)}
         counts = t.reload_open_trades(settled)
         assert counts == {"restored": 0, "closed": 1}
         note = vault.read_note("04-trade-history/trades/2026-07-23-kb-abc123.md")
         assert note.frontmatter["status"] == "closed"
         # 10*100 - (10*52 + 5) = 475 on the recorded basis
         assert note.frontmatter["realized_pnl_cents"] == 475
+        # Kalshi's own settlement record, carried alongside the internally
+        # computed P&L above (not in place of it) so the two can be
+        # cross-checked against each other.
+        assert note.frontmatter["settlement_raw"] == {
+            "ticker": TICKER, "market_result": "yes"}
+        assert note.frontmatter["settlement_revenue_cents"] == 1000
+        assert note.frontmatter["settlement_yes_count"] == 10.0
+        assert note.frontmatter["settlement_no_count"] == 0.0
+        assert note.frontmatter["settlement_total_cost_cents"] == 525

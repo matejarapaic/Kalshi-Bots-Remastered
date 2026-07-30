@@ -15,7 +15,9 @@ import uuid
 from datetime import datetime, timezone
 
 from kalshi_bots.skills.fair_value_model import evaluate, side_edges
-from kalshi_bots.skills.risk_management import ENTRY_PHASES, MIN_EDGE_CENTS
+# MIN_EDGE_CENTS is read via current() at flag time, not frozen at import —
+# the tuner may raise it live (skills/risk-management/SKILL.md, "Live overrides")
+from kalshi_bots.skills.risk_management import ENTRY_PHASES, current
 from kalshi_bots.skills.window_monitor import window_phase
 from kalshi_bots.types import CryptoSignal, MarketRef, Phase, WindowRef
 
@@ -126,7 +128,7 @@ class WindowMonitor:
         edges = side_edges(est, snapshot)
         best_side = max((s for s in ("yes", "no") if edges[s] is not None),
                         key=lambda s: edges[s], default=None)
-        if best_side is None or edges[best_side] < MIN_EDGE_CENTS:
+        if best_side is None or edges[best_side] < current("MIN_EDGE_CENTS"):
             return None
         self._last_candidate_mono = mono
         sig = CryptoSignal(

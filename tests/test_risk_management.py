@@ -252,6 +252,21 @@ class TestLedgerLifecycle:
         assert exp.open_positions == 0
         assert exp.daily_realized_pnl_cents == 40 * 70 - (40 * 60 + 68)
 
+    def test_exit_fill_labeled_as_other_side_is_flipped_into_position_terms(self, rm):
+        """Regression from the 2026-07-29 live session: Kalshi labels the
+        fill that closes a NO position as a YES-side trade priced in
+        yes-cents (closing NO == buying YES). Netting that raw yes price
+        against a no-terms basis inflated proceeds — a NO bought at 67c and
+        closed at 66c (yes price 34c) must book roughly -1c/contract, not
+        +34c-ish."""
+        m = market()
+        rm.on_fill(fill(2, 67, fee=3, side="no"), m, "btc-15min-fair-value", "E1")
+        pnl = rm.on_exit(fill(2, 34, fee=3, side="yes", action="buy"),
+                         m, "btc-15min-fair-value")
+        # basis 2*67+3=137; proceeds 2*(100-34)-3=129
+        assert pnl == -8
+        assert rm.exposure().open_positions == 0
+
     def test_settle_win(self, rm):
         m = market()
         rm.on_fill(fill(10, 93, fee=7), m, "btc-15min-fair-value", "E1")
@@ -345,3 +360,84 @@ class TestIntentSerialization:
                                   eid="E1", ticker="T1-15"))
         # with the intent gone, per-event room is back
         assert r2.contracts > 0
+
+
+class TestOverrides:
+    def test_current_falls_back_to_baseline(self):
+        from kalshi_bots.skills import risk_management as risk_mod
+        assert risk_mod.current("MIN_EDGE_CENTS") == risk_mod.MIN_EDGE_CENTS
+        assert risk_mod.current("SKILL_RISK_MULTIPLIER",
+                                skill="btc-15min-fair-value") == (1.0, 1.0)
+
+    def test_current_respects_monkeypatched_baseline(self, monkeypatch):
+        """The rm_uncapped fixture pattern must keep working: current() reads
+        the live module constant, never a frozen copy."""
+        from kalshi_bots.skills import risk_management as risk_mod
+        monkeypatch.setattr(
+            "kalshi_bots.skills.risk_management.MIN_EDGE_CENTS", 7)
+        assert risk_mod.current("MIN_EDGE_CENTS") == 7
+
+    def test_override_changes_sizing(self, rm_uncapped):
+        from kalshi_bots.skills import risk_management as risk_mod
+        base = rm_uncapped.size(req(eid="E1", ticker="T1-00"))
+        rm_uncapped.cancel_intent("T1-00", "btc-15min-fair-value")
+        risk_mod.set_override("PER_TRADE_CAP_PCT", 2,
+                              skill="btc-15min-fair-value",
+                              reason="test", caller="tuner")
+        tightened = rm_uncapped.size(req(eid="E2", ticker="T2-00"))
+        assert 0 < tightened.contracts < base.contracts
+
+    def test_out_of_corridor_raises_and_applies_nothing(self):
+        from kalshi_bots.skills import risk_management as risk_mod
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("MIN_EDGE_CENTS", 3,   # below baseline: looser
+                                  reason="t", caller="tuner")
+        assert not risk_mod.has_override("MIN_EDGE_CENTS")
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("PER_TRADE_CAP_PCT", 6,  # above baseline
+                                  skill="btc-15min-fair-value",
+                                  reason="t", caller="tuner")
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("TOTAL_EXPOSURE_CAP_PCT", 3,  # below 0.5x floor
+                                  reason="t", caller="tuner")
+        assert risk_mod.active_overrides() == {}
+
+    def test_non_tunable_names_rejected(self):
+        from kalshi_bots.skills import risk_management as risk_mod
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("INTENT_TTL_S", 60, reason="t", caller="tuner")
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("NOT_A_PARAM", 1, reason="t", caller="tuner")
+
+    def test_tuple_param_validated_elementwise(self):
+        from kalshi_bots.skills import risk_management as risk_mod
+        risk_mod.set_override("SKILL_RISK_MULTIPLIER", (0.5, 0.5),
+                              skill="btc-15min-fair-value",
+                              reason="t", caller="tuner")
+        assert risk_mod.current("SKILL_RISK_MULTIPLIER",
+                                skill="btc-15min-fair-value") == (0.5, 0.5)
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("SKILL_RISK_MULTIPLIER", (1.5, 1.0),
+                                  skill="btc-15min-fair-value",
+                                  reason="t", caller="tuner")
+
+    def test_clear_override_retracks_baseline(self):
+        from kalshi_bots.skills import risk_management as risk_mod
+        risk_mod.set_override("MIN_EDGE_CENTS", 6, reason="t", caller="tuner")
+        assert risk_mod.current("MIN_EDGE_CENTS") == 6
+        assert risk_mod.clear_override("MIN_EDGE_CENTS") is True
+        assert risk_mod.current("MIN_EDGE_CENTS") == risk_mod.MIN_EDGE_CENTS
+        assert risk_mod.clear_override("MIN_EDGE_CENTS") is False
+
+    def test_active_overrides_snapshot_and_log(self):
+        from kalshi_bots.skills import risk_management as risk_mod
+        risk_mod.set_override("MIN_EDGE_CENTS", 6, reason="t", caller="tuner")
+        risk_mod.set_override("PER_TRADE_CAP_PCT", 3,
+                              skill="btc-15min-fair-value",
+                              reason="t", caller="tuner")
+        assert risk_mod.active_overrides() == {
+            "MIN_EDGE_CENTS": 6,
+            "PER_TRADE_CAP_PCT|btc-15min-fair-value": 3,
+        }
+        assert len(risk_mod.override_log) == 2
+        assert risk_mod.override_log[-1]["caller"] == "tuner"

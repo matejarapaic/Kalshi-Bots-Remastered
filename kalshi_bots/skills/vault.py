@@ -58,6 +58,7 @@ WRITE_SCOPES: dict[str, dict] = {
     "window-monitor": {"03-market-context": None},
     "orchestrator": {"03-market-context": None},
     "discord": {"03-market-context": None},
+    "tuner": {"03-market-context": None},
     "human": "*",
     "admin": "*",
     "system": "*",

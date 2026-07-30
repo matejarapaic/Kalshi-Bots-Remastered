@@ -22,11 +22,13 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 
 from kalshi_bots.agents.analyst import Analyst
 from kalshi_bots.agents.trader import Trader
+from kalshi_bots.agents.tuner import Tuner
 from kalshi_bots.agents.window_monitor import WindowMonitor
 from kalshi_bots.env import load_env
 from kalshi_bots.paper import PaperBroker
@@ -42,6 +44,7 @@ load_env()
 log = logging.getLogger(__name__)
 
 TICK_S = 1.0  # evaluation cadence over streaming state
+RECENT_TRADES_TTL_S = 20.0  # dashboard History table refresh floor
 LIVE_FLAG = "--i-know-what-im-doing-crypto"
 LIVE_CONFIRM_PHRASE = "TRADE LIVE"
 
@@ -192,7 +195,34 @@ class Orchestrator:
         self.analyst = Analyst(self.vault, self.broker, discord=self.discord,
                                env=self.mode,
                                paper_broker=self.broker if paper else None)
+        self.tuner = Tuner(self.vault, discord=self.discord, env=self.mode)
+        try:
+            self.tuner.reload()
+        except Exception as e:
+            log.warning("tuner state reload skipped: %s", e)
         self.events: list[dict] = []   # dashboard feed (bounded below)
+        # recent-trades cache (dashboard History table). Settlements only
+        # change ~4x/hour, so a short TTL keeps /api/state off the portfolio
+        # API on every 3s poll. (rows, fetched_mono).
+        self._recent_trades: tuple[list[dict], float] = ([], 0.0)
+
+    def recent_trades(self, limit: int = 15) -> list[dict]:
+        """Most-recent settled trades, shaped like Kalshi's History tab.
+        Read-only, TTL-cached. Empty in paper mode (no real settlements)."""
+        if self.paper:
+            return []
+        rows, fetched = self._recent_trades
+        if rows and time.monotonic() - fetched < RECENT_TRADES_TTL_S:
+            return rows
+        try:
+            from kalshi_bots.skills.kalshi_client import settled_trade_summary
+            setts = self.kalshi.get_recent_settlements(limit=limit)
+            rows = [settled_trade_summary(s) for s in setts]
+            self._recent_trades = (rows, time.monotonic())
+        except Exception as e:
+            log.warning("recent-trades fetch failed: %s", e)
+            return self._recent_trades[0]  # serve last good rows, never crash the view
+        return rows
 
     def _emit(self, kind: str, **data):
         for k, v in list(data.items()):
@@ -241,15 +271,23 @@ class Orchestrator:
             summary["exits"].extend(self.trader.manage_positions(now))
         except Exception as e:
             log.error("exit sweep failed: %s", e)
+        reports = []
         try:
-            for report in self.analyst.poll_pending(now):
-                if report is not None:
-                    self._emit("postmortem", event_id=report.event_id,
-                               settlement=report.settlement_status,
-                               trades=report.trades_audited,
-                               pnl_cents=report.realized_pnl_cents)
+            reports = [r for r in self.analyst.poll_pending(now) if r is not None]
+            for report in reports:
+                self._emit("postmortem", event_id=report.event_id,
+                           settlement=report.settlement_status,
+                           trades=report.trades_audited,
+                           pnl_cents=report.realized_pnl_cents)
         except Exception as e:
             log.error("settlement poll failed: %s", e)
+        try:
+            for adj in self.tuner.on_reports(reports):
+                self._emit("tuner-adjustment", param=adj.param, skill=adj.skill,
+                           old=adj.old_value, new=adj.new_value,
+                           reason=adj.reason)
+        except Exception as e:
+            log.error("tuner adjustment failed: %s", e)
         self.discord.flush()
         return summary
 

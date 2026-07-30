@@ -52,7 +52,7 @@ def test_state_contract_shape(client):
     s = c.get("/api/state").json()
     assert set(s.keys()) == {"env", "mode", "window", "feed", "exposure",
                              "unrealized_pnl_cents", "unrealized_pnl_pct",
-                             "open_trades", "postmortems", "events"}
+                             "open_trades", "postmortems", "recent_trades", "events"}
     evt = s["events"][-1]
     assert {"series", "event_id", "signal_type"} <= set(evt.keys())
     assert s["window"] is None  # no monitor on the fake -> renders empty

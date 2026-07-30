@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/bin/python",
       "runtimeArgs": ["-m", "kalshi_bots.dashboard"],
       "port": 8800
+    },
+    {
+      "name": "dashboard-static-preview",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["-m", "http.server", "8801", "--directory", "kalshi_bots/dashboard_static"],
+      "port": 8801
     }
   ]
 }

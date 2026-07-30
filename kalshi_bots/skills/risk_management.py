@@ -6,8 +6,11 @@ system is named here (risk params below) — no other module may inline one.
 from __future__ import annotations
 
 import logging
+import math
+import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -86,6 +89,48 @@ DEPTH_CONSUMPTION_MAX = 0.25
 INTENT_TTL_S = 180  # sizing intent reservation window (documented limitation)
 LEDGER_PATH = "03-market-context/exposure-ledger.md"
 
+# ---------------------------------------------------------------------------
+# LIVE OVERRIDE LAYER (tuner). The tuner agent may adjust any parameter below
+# at runtime, but only inside a corridor whose ceiling is the human-approved
+# baseline above — it can make the system MORE conservative than the owner
+# signed off on, never less. `current(name, skill=None)` is the read path for
+# every tunable; the module constants stay the single source of baselines
+# (and remain monkeypatchable in tests — `current` falls back to a live
+# module lookup, never a frozen copy).
+# ---------------------------------------------------------------------------
+# PROPOSED 2026-07-28: per-parameter corridors as (floor_mult, ceil_mult)
+# applied to the live baseline, measured along each parameter's conservative
+# direction — ceil 1.0 means "never looser than baseline"; the (1.0, 2.0)
+# entries tighten by *raising* (e.g. MIN_EDGE_CENTS demands more edge).
+# ENTRY_PHASES is non-numeric and deliberately not tunable. Awaiting owner
+# sign-off.
+TUNABLE_BOUNDS: dict[str, tuple[float, float]] = {
+    "BASE_KELLY_FRACTION": (0.5, 1.0),
+    "SKILL_RISK_MULTIPLIER": (0.25, 1.0),
+    "PER_TRADE_CAP_PCT": (0.25, 1.0),
+    "SKILL_MIN_DEPTH": (1.0, 2.0),
+    "MAX_CONTRACTS_PER_WINDOW": (0.25, 1.0),
+    "MIN_EDGE_CENTS": (1.0, 2.0),
+    "EXIT_EDGE_CENTS": (1.0, 2.0),
+    "SIGMA_PLAUSIBLE_MIN": (1.0, 2.0),
+    "SIGMA_PLAUSIBLE_MAX": (0.5, 1.0),
+    "MIN_DEPTH_WITHIN_5C": (1.0, 2.0),
+    "DEPTH_COLLAPSE_FRACTION": (1.0, 2.0),
+    "STOP_LOSS_PCT": (0.5, 1.0),
+    "VELOCITY_THRESHOLD_PCT": (0.5, 1.0),
+    "VELOCITY_SIZE_SCALE": (0.5, 1.0),
+    "TOTAL_EXPOSURE_CAP_PCT": (0.5, 1.0),
+    "PER_EVENT_EXPOSURE_CAP_PCT": (0.5, 1.0),
+    "CORRELATION_SCALE_SAME_EVENT": (0.5, 1.0),
+    "DAILY_LOSS_HALT_PCT": (0.5, 1.0),
+    "MAX_OPEN_POSITIONS": (0.25, 1.0),
+    "DEPTH_CONSUMPTION_MAX": (0.5, 1.0),
+}
+
+_overrides: dict[tuple[str, str | None], object] = {}
+_override_lock = threading.Lock()
+override_log: deque = deque(maxlen=100)  # bounded audit trail (24/7 hygiene)
+
 
 class RiskError(Exception):
     pass
@@ -93,6 +138,109 @@ class RiskError(Exception):
 
 class RiskUnknownSkill(RiskError):
     pass
+
+
+class RiskOverrideError(RiskError):
+    pass
+
+
+def baseline(name: str, skill: str | None = None):
+    """The live module constant (so test monkeypatching keeps working)."""
+    base = getattr(sys.modules[__name__], name)
+    if isinstance(base, dict):
+        if skill is None:
+            raise RiskOverrideError(f"{name} is per-skill; skill required")
+        if skill not in base:
+            raise RiskUnknownSkill(f"{skill!r} not in {name}")
+        return base[skill]
+    if skill is not None:
+        raise RiskOverrideError(f"{name} is not per-skill")
+    return base
+
+
+def current(name: str, skill: str | None = None):
+    """Effective value of a risk parameter: the live override if one is set,
+    else the baseline module constant."""
+    ov = _overrides.get((name, skill))
+    if ov is not None:
+        return ov
+    return baseline(name, skill)
+
+
+def has_override(name: str, skill: str | None = None) -> bool:
+    return (name, skill) in _overrides
+
+
+def _corridor(name: str, baseline):
+    lo_m, hi_m = TUNABLE_BOUNDS[name]
+    lo, hi = lo_m * baseline, hi_m * baseline
+    if isinstance(baseline, int):
+        lo = max(1, math.floor(lo)) if lo_m < 1.0 else lo  # count-caps floor at 1
+    return lo, hi
+
+
+def _validate_override(name: str, value, baseline) -> None:
+    if isinstance(baseline, tuple):
+        if not (isinstance(value, tuple) and len(value) == len(baseline)):
+            raise RiskOverrideError(
+                f"{name} override must be a {len(baseline)}-tuple")
+        for v, b in zip(value, baseline):
+            _validate_override(name, v, b)
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RiskOverrideError(f"{name} override must be numeric, got {value!r}")
+    lo, hi = _corridor(name, baseline)
+    if not (lo <= value <= hi):
+        raise RiskOverrideError(
+            f"{name} override {value} outside corridor [{lo}, {hi}] "
+            f"(baseline {baseline})")
+
+
+def set_override(name: str, value, *, skill: str | None = None,
+                 reason: str = "", caller: str = "tuner"):
+    """Apply a live override, validated against the parameter's corridor.
+    Returns (old_effective, new). Raises RiskOverrideError (and applies
+    nothing) for a non-tunable name or an out-of-corridor value."""
+    if name not in TUNABLE_BOUNDS:
+        raise RiskOverrideError(f"{name} is not live-tunable")
+    base = baseline(name, skill)
+    if base is None:
+        raise RiskOverrideError(f"{name}[{skill}] has no numeric baseline")
+    _validate_override(name, value, base)
+    if isinstance(base, int) and not isinstance(base, bool):
+        value = int(round(value))
+    with _override_lock:
+        old = current(name, skill)
+        _overrides[(name, skill)] = value
+        override_log.append({
+            "param": name, "skill": skill, "old": old, "new": value,
+            "reason": reason, "caller": caller,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    label = f"{name}[{skill}]" if skill else name
+    log.warning("risk override: %s %s -> %s (%s, by %s)",
+                label, old, value, reason or "no reason given", caller)
+    return old, value
+
+
+def clear_override(name: str, skill: str | None = None) -> bool:
+    """Fully revert a parameter to tracking its baseline. Returns whether an
+    override was actually active."""
+    with _override_lock:
+        return _overrides.pop((name, skill), None) is not None
+
+
+def clear_all_overrides() -> None:
+    with _override_lock:
+        _overrides.clear()
+
+
+def active_overrides() -> dict[str, object]:
+    """Serializable snapshot for persistence/dashboards: 'NAME' or
+    'NAME|skill' -> value."""
+    with _override_lock:
+        return {(f"{n}|{s}" if s else n): (list(v) if isinstance(v, tuple) else v)
+                for (n, s), v in _overrides.items()}
 
 
 def kelly_fraction(p: float, c: int) -> float:
@@ -184,7 +332,7 @@ class RiskManager:
 
     def _daily_halted(self, bankroll: int) -> bool:
         pnl = self._daily_pnl.get(self._et_today(), 0)
-        return pnl <= -(DAILY_LOSS_HALT_PCT / 100) * bankroll
+        return pnl <= -(current("DAILY_LOSS_HALT_PCT") / 100) * bankroll
 
     # --- public interface ---
 
@@ -215,18 +363,18 @@ class RiskManager:
             return zero("no_edge")
 
         # (2)+(3) raw fraction and skill multiplier
-        mult = SKILL_RISK_MULTIPLIER[skill]
+        mult = current("SKILL_RISK_MULTIPLIER", skill=skill)
         kf_used = None
         if mult is None:  # flat sizing (no crypto skill uses it yet; mechanism kept)
-            fraction = PER_TRADE_CAP_PCT[skill] / 100
+            fraction = current("PER_TRADE_CAP_PCT", skill=skill) / 100
         else:
             f_star = kelly_fraction(req.model_prob, c)
             m = mult[0] if req.is_live else mult[1]
-            fraction = f_star * BASE_KELLY_FRACTION * m
+            fraction = f_star * current("BASE_KELLY_FRACTION") * m
             kf_used = fraction
 
         # (4) per-trade cap
-        cap = PER_TRADE_CAP_PCT[skill] / 100
+        cap = current("PER_TRADE_CAP_PCT", skill=skill) / 100
         if mult is not None and fraction > cap:
             fraction = cap
             capped_by.append("per_trade_cap")
@@ -236,8 +384,8 @@ class RiskManager:
         # gap rather than confirming a stable mispricing, so size smaller
         # into it regardless of what the skill's own Kelly math says.
         if req.recent_move_pct is not None and \
-                abs(req.recent_move_pct) >= VELOCITY_THRESHOLD_PCT:
-            fraction *= VELOCITY_SIZE_SCALE
+                abs(req.recent_move_pct) >= current("VELOCITY_THRESHOLD_PCT"):
+            fraction *= current("VELOCITY_SIZE_SCALE")
             capped_by.append("velocity_scale")
 
         # (6) correlation scaling (same window/event)
@@ -245,19 +393,19 @@ class RiskManager:
         eid = req.event_id or (req.signal.window.event_ticker
                                if req.signal and req.signal.window else "")
         if self._event_cost(eid, labels) > 0:
-            fraction *= CORRELATION_SCALE_SAME_EVENT
+            fraction *= current("CORRELATION_SCALE_SAME_EVENT")
             capped_by.append("correlation_same_event")
 
         budget = int(fraction * bankroll)
 
         # (7) per-event cap
-        event_room = int(PER_EVENT_EXPOSURE_CAP_PCT / 100 * bankroll) - self._event_cost(eid, labels)
+        event_room = int(current("PER_EVENT_EXPOSURE_CAP_PCT") / 100 * bankroll) - self._event_cost(eid, labels)
         if budget > event_room:
             budget = max(0, event_room)
             capped_by.append("per_event_cap")
 
         # (8) total exposure cap
-        total_room = int(TOTAL_EXPOSURE_CAP_PCT / 100 * bankroll) - self._open_cost()
+        total_room = int(current("TOTAL_EXPOSURE_CAP_PCT") / 100 * bankroll) - self._open_cost()
         if budget > total_room:
             budget = max(0, total_room)
             capped_by.append("total_exposure_cap")
@@ -270,21 +418,21 @@ class RiskManager:
 
         # (10) max open positions
         self._prune_intents()
-        if len(self._positions) + len(self._intents) >= MAX_OPEN_POSITIONS:
+        if len(self._positions) + len(self._intents) >= current("MAX_OPEN_POSITIONS"):
             return zero("max_open_positions")
 
         # (11) depth gate
-        if req.book_depth_at_entry < SKILL_MIN_DEPTH[skill]:
+        if req.book_depth_at_entry < current("SKILL_MIN_DEPTH", skill=skill):
             return zero("depth_min")
         contracts = budget // c_f
-        depth_cap = int(DEPTH_CONSUMPTION_MAX * req.book_depth_at_entry)
+        depth_cap = int(current("DEPTH_CONSUMPTION_MAX") * req.book_depth_at_entry)
         if contracts > depth_cap:
             contracts = depth_cap
             capped_by.append("depth_gate")
 
         # (12) per-window contract cap (draft-skill training wheels)
-        if contracts > MAX_CONTRACTS_PER_WINDOW:
-            contracts = MAX_CONTRACTS_PER_WINDOW
+        if contracts > current("MAX_CONTRACTS_PER_WINDOW"):
+            contracts = current("MAX_CONTRACTS_PER_WINDOW")
             capped_by.append("per_window_contract_cap")
 
         # (13) integer floor
@@ -329,7 +477,11 @@ class RiskManager:
                 return None
             portion = min(fill.contracts, p["contracts"])
             basis = round(p["cost_cents"] * portion / p["contracts"])
-            proceeds = portion * fill.price - fill.taker_fee_cents
+            # Kalshi labels the fill that closes a NO position as a YES-side
+            # trade (closing NO == buying YES), priced in yes-cents; flip it
+            # into the position's own terms before netting against the basis.
+            price = fill.price if fill.side == p["side"] else 100 - fill.price
+            proceeds = portion * price - fill.taker_fee_cents
             pnl = proceeds - basis
             p["contracts"] -= portion
             p["cost_cents"] -= basis

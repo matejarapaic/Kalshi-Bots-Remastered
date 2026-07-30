@@ -6,8 +6,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kalshi_bots.skills.kalshi_client import (
-    KalshiClient, KalshiProdRefused, build_snapshot, depth_within,
-    dollars_to_cents, est_fee_cents,
+    KalshiClient, KalshiProdRefused, _parse_settlement, build_snapshot,
+    depth_within, dollars_to_cents, est_fee_cents, settled_trade_summary,
 )
 from kalshi_bots.types import MarketRef, OrderRequest
 
@@ -32,6 +32,76 @@ class TestDollarConversion:
     def test_fractional_quantities_floor(self):
         snap = build_snapshot(MARKET, ob(yes=[["0.4400", "6903.99"]]))
         assert snap.no_book[0].quantity == 6903  # floored, never rounded up
+
+
+class TestSettlementParsing:
+    """Real /portfolio/settlements rows captured live from prod 2026-07-24.
+    The derived columns must reproduce Kalshi's own History tab."""
+
+    # clean hold-to-settlement winner: 5 NO held, market settled NO.
+    CLEAN_WIN = {
+        "event_ticker": "KXBTC15M-26JUL240045", "ticker": "KXBTC15M-26JUL240045-45",
+        "market_result": "no", "yes_count_fp": "0.00", "no_count_fp": "5.00",
+        "yes_total_cost_dollars": "0.000000", "no_total_cost_dollars": "3.310000",
+        "fee_cost": "0.077000", "revenue": 500, "value": 0,
+        "settled_time": "2026-07-24T00:45:06Z",
+    }
+    # hedged/partially-closed: bought 6 NO and 2 YES, net 4 NO, settled NO.
+    NETTED = {
+        "event_ticker": "KXBTC15M-26JUL240100", "ticker": "KXBTC15M-26JUL240100-00",
+        "market_result": "no", "yes_count_fp": "2.00", "no_count_fp": "6.00",
+        "yes_total_cost_dollars": "0.249000", "no_total_cost_dollars": "3.360000",
+        "fee_cost": "0.112000", "revenue": 400, "value": 0,
+    }
+    # loser: 8 NO held, market settled YES -> zero payout.
+    LOSER = {
+        "ticker": "KXBTC15M-26JUL240115-15", "market_result": "yes",
+        "yes_count_fp": "0.00", "no_count_fp": "8.00",
+        "yes_total_cost_dollars": "0.000000", "no_total_cost_dollars": "1.080000",
+        "fee_cost": "0.056700", "revenue": 0,
+    }
+
+    def test_revenue_is_cents_not_dollars(self):
+        # regression: old parser read `revenue_dollars` (absent) -> always 0
+        assert _parse_settlement(self.CLEAN_WIN).revenue_cents == 500
+
+    def test_clean_win_matches_kalshi_columns(self):
+        row = settled_trade_summary(_parse_settlement(self.CLEAN_WIN))
+        assert row["outcome"] == "no"
+        assert row["position_side"] == "no" and row["position_count"] == 5
+        assert row["payout_cents"] == 500
+        assert row["total_cost_cents"] == 339        # 331 + 0 + round(7.7)=8
+        assert row["return_cents"] == 161            # 500 - 339, == screenshot +$1.61
+        assert round(row["return_pct"]) == 47        # 161/339 ~ 47.5%
+
+    def test_final_position_is_net_of_both_sides(self):
+        row = settled_trade_summary(_parse_settlement(self.NETTED))
+        assert row["position_side"] == "no" and row["position_count"] == 4  # 6 - 2
+        assert row["payout_cents"] == 400
+        assert row["total_cost_cents"] == 372        # 25 + 336 + 11
+
+    def test_loser_full_loss(self):
+        row = settled_trade_summary(_parse_settlement(self.LOSER))
+        assert row["payout_cents"] == 0
+        assert row["total_cost_cents"] == 114        # 108 + round(5.67)=6
+        assert row["return_cents"] == -114 and round(row["return_pct"]) == -100
+
+    # position CLOSED before settlement: bought 3 YES and offset with 3 NO, so
+    # net 0 -> settled flat. The pre-settlement sell proceeds are not in the
+    # settlement payload, so the return is a floor (reads worse than realized).
+    CLOSED_EARLY = {
+        "ticker": "KXBTC15M-26JUL241315-15", "market_result": "no",
+        "yes_count_fp": "3.00", "no_count_fp": "3.00",
+        "yes_total_cost_dollars": "1.770000", "no_total_cost_dollars": "1.260000",
+        "fee_cost": "0.102000", "revenue": 0,
+    }
+
+    def test_closed_early_is_flagged_and_return_is_a_floor(self):
+        row = settled_trade_summary(_parse_settlement(self.CLOSED_EARLY))
+        assert row["position_count"] == 0 and row["closed_early"] is True
+        assert row["payout_cents"] == 0
+        assert row["total_cost_cents"] == 313        # 177 + 126 + 10
+        assert row["return_cents"] == -313           # settlement-only floor
 
 
 class TestDerivedAsks:
@@ -329,6 +399,46 @@ class TestPlaceOrderV2:
         assert captured["body"]["side"] == "bid"
         assert captured["body"]["price"] == "0.9900"
 
+    def test_buy_no_fill_price_reported_in_no_terms(self, monkeypatch):
+        """Regression for the 2026-07-29 live session: the v2 response prices
+        fills in yes-book terms, and recording that raw number as a NO
+        trade's entry/exit price computed the exact NEGATIVE of the true
+        naive pnl (every losing NO round-trip in the vault showed as a win).
+        A NO buy at 67c that fills must report 67c, not the 33c yes-terms
+        average."""
+        c = self._client(monkeypatch)
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            return _FakeResponse(200, {"order": {
+                "order_id": "o6", "status": "executed",
+                "fill_count_fp": "2.00",
+                "taker_fill_cost_dollars": "0.6600",  # 33c/contract, yes terms
+                "taker_fees_dollars": "0.03"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        result = c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="no", action="buy",
+            contracts=2, limit_price=67, client_order_id="kb-6"))
+        assert result.avg_fill_price == 67
+
+    def test_sell_no_fill_price_reported_in_no_terms(self, monkeypatch):
+        """The exit half of the same bug: closing a NO position fills on the
+        yes book (a bid), so the response's average is a yes price."""
+        c = self._client(monkeypatch)
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            return _FakeResponse(200, {"order": {
+                "order_id": "o7", "status": "executed",
+                "fill_count_fp": "2.00",
+                "taker_fill_cost_dollars": "0.6800",  # 34c/contract, yes terms
+                "taker_fees_dollars": "0.03"}})
+
+        monkeypatch.setattr(c.session, "request", fake_request)
+        result = c.place_order(OrderRequest(
+            market_ticker=MARKET.market_ticker, side="no", action="sell",
+            contracts=2, limit_price=65, client_order_id="kb-7"))
+        assert result.avg_fill_price == 66  # sold no at 66c, not "34c"
+
     def test_sell_yes_posts_ask_not_bid(self, monkeypatch):
         """Same class of bug on the YES side: exiting a YES position must
         post an ask (sell), not the bid a buy would use."""
@@ -362,3 +472,51 @@ class TestPlaceOrderV2:
             c.place_order(OrderRequest(
                 market_ticker=MARKET.market_ticker, side="yes", action="buy",
                 contracts=1, limit_price=50, client_order_id="kb-3"))
+
+
+# Captured verbatim from the live prod account 2026-07-29 (the entry fill of
+# vault trade kb-0c1a09bb6b56). Two field-level discoveries live in here:
+# fees arrive as `fee_cost` (not `taker_fees_dollars`, which exists only on
+# order objects), and `count_fp` can be fractional.
+REAL_FILL = {
+    "action": "sell", "book_side": "ask", "count_fp": "2.00",
+    "created_time": "2026-07-29T04:17:05.915114Z", "fee_cost": "0.031000",
+    "fill_id": "8cafb0dd-40bf-72d5-b490-fd90314e66ba", "is_taker": True,
+    "market_ticker": "KXBTC15M-26JUL290030-30", "no_price_dollars": "0.6700",
+    "order_id": "abf02e49-7051-4c71-817f-7ea1a578fbe5", "outcome_side": "no",
+    "side": "no", "subaccount_number": 0, "ticker": "KXBTC15M-26JUL290030-30",
+    "trade_id": "8cafb0dd-40bf-72d5-b490-fd90314e66ba", "ts": 1785298625,
+    "yes_price_dollars": "0.3300",
+}
+
+
+class TestGetFills:
+    def _client(self, monkeypatch, fills):
+        monkeypatch.setenv("KALSHI_ENV", "demo")
+        monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
+        monkeypatch.delenv("KALSHI_KEY_PATH", raising=False)
+        c = KalshiClient()
+        c._key_id, c._private_key = "kid", object()
+        c._headers = lambda method, path: {}
+        monkeypatch.setattr(c.session, "request", lambda *a, **k:
+                            _FakeResponse(200, {"fills": fills}))
+        return c
+
+    def test_real_fill_fee_comes_from_fee_cost(self, monkeypatch):
+        """Regression: the parser read `taker_fees_dollars`, a field real
+        fills don't carry, so every live fill's fee parsed as 0 and the
+        exposure ledger's cost basis was silently fee-blind."""
+        c = self._client(monkeypatch, [REAL_FILL])
+        f = c.get_fills("KXBTC15M-26JUL290030-30")[0]
+        assert f.taker_fee_cents == 3  # 0.031 dollars
+        assert f.price == 67           # no-side fill reads no_price_dollars
+        assert f.contracts == 2
+
+    def test_fractional_count_fp_rounds_instead_of_truncating(self, monkeypatch):
+        """Live orders split into fractional fills (a real 3-lot came back
+        as count_fp 2.05 + 0.95); int() truncation turned 0.95 into 0."""
+        a = dict(REAL_FILL, count_fp="2.05")
+        b = dict(REAL_FILL, count_fp="0.95")
+        c = self._client(monkeypatch, [a, b])
+        fills = c.get_fills("KXBTC15M-26JUL290030-30")
+        assert [f.contracts for f in fills] == [2, 1]

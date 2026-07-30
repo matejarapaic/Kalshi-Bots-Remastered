@@ -123,6 +123,70 @@ def build_snapshot(market: MarketRef, orderbook_raw: dict,
     )
 
 
+def _parse_settlement(raw: dict, fallback_ticker: str = "") -> Settlement:
+    """Real /portfolio/settlements row (verified live 2026-07-24) ->
+    Settlement. Field names: market_result, yes_count_fp/no_count_fp (gross,
+    fractional), yes_total_cost_dollars/no_total_cost_dollars, fee_cost (all
+    dollar strings), and `revenue` — an INTEGER already in cents (the net
+    directional payout: |yes_count - no_count| * 100 when the net side wins,
+    else 0). NB: the field is `revenue`, not `revenue_dollars` — reading the
+    latter (as this parser used to) silently yielded 0 every time."""
+    result = raw.get("market_result", "")
+    yes_ct = float(raw.get("yes_count_fp", raw.get("yes_count", 0)) or 0)
+    no_ct = float(raw.get("no_count_fp", raw.get("no_count", 0)) or 0)
+    yes_cost = dollars_to_cents(raw.get("yes_total_cost_dollars", "0") or "0")
+    no_cost = dollars_to_cents(raw.get("no_total_cost_dollars", "0") or "0")
+    fee = abs(dollars_to_cents(raw.get("fee_cost", "0") or "0"))
+    settled_s = raw.get("settled_time")
+    return Settlement(
+        market_ticker=raw.get("ticker", fallback_ticker),
+        result=result if result in ("yes", "no") else "void",
+        settled_ts=datetime.fromisoformat(settled_s.replace("Z", "+00:00"))
+        if settled_s else None,
+        revenue_cents=int(raw.get("revenue", 0) or 0),
+        raw=raw,
+        event_ticker=raw.get("event_ticker", ""),
+        yes_count=yes_ct, no_count=no_ct, fee_cents=fee,
+        total_cost_cents=yes_cost + no_cost + fee,
+    )
+
+
+def settled_trade_summary(s: Settlement) -> dict:
+    """Kalshi-History-tab row for a settlement, from the settlement payload
+    alone (authoritative and permanent — unlike the fills feed, which ages out
+    within hours and cannot be relied on to reconstruct older trades).
+
+    Final position is the NET of the two sides (buying/selling the opposite
+    side is how a position is closed on Kalshi, so gross yes+no over-counts):
+    net = yes_count - no_count; net 0 means the position was closed before
+    settlement (settled flat).
+
+    Money columns use Kalshi's own reported figures:
+      payout      = revenue (net directional settlement payout)
+      total cost  = yes+no traded cost + fees  (Kalshi "Total cost")
+      return      = payout - total cost;  % over cost
+    Exact vs Kalshi for hold-to-settlement trades (validated against a live
+    row: 5 NO, $5 payout, $3.39 cost, +$1.61/48%). For positions CLOSED before
+    settlement the pre-settlement sell proceeds are not in this payload, so the
+    return reads more negative than the realized P&L — the fills feed that
+    would correct it is not retained long enough to trust."""
+    net = s.yes_count - s.no_count
+    ret = s.revenue_cents - s.total_cost_cents
+    return {
+        "market_ticker": s.market_ticker,
+        "event_ticker": s.event_ticker,
+        "outcome": s.result,
+        "position_count": abs(net),
+        "position_side": "yes" if net >= 0 else "no",
+        "closed_early": abs(net) < 1e-9,          # settled flat -> return is a floor
+        "payout_cents": s.revenue_cents,          # Kalshi "Settlement payout"
+        "total_cost_cents": s.total_cost_cents,
+        "return_cents": ret,
+        "return_pct": (100.0 * ret / s.total_cost_cents) if s.total_cost_cents else 0.0,
+        "settled_ts": s.settled_ts.isoformat() if s.settled_ts else None,
+    }
+
+
 def _parse_market(raw: dict, family: str = "") -> MarketRef:
     close_ts = None
     for key in ("expected_expiration_time", "close_time"):
@@ -325,9 +389,14 @@ class KalshiClient:
             out.append(Fill(
                 order_id=f.get("order_id", ""), market_ticker=f.get("ticker", ""),
                 side=f.get("side", "yes"), action=f.get("action", "buy"),
-                contracts=int(float(f.get("count_fp", f.get("count", 0)))),
+                # count_fp is fractional on live fills (e.g. "2.05" + "0.95"
+                # for one 3-lot order) — int() truncation undercounted them
+                contracts=round(float(f.get("count_fp", f.get("count", 0)))),
                 price=price,
-                taker_fee_cents=abs(dollars_to_cents(f.get("taker_fees_dollars", "0") or "0")),
+                # live fills carry the fee as `fee_cost` (verified 2026-07-29);
+                # the previously-read `taker_fees_dollars` exists only on
+                # order objects, so every fill's fee silently parsed as 0
+                taker_fee_cents=abs(dollars_to_cents(f.get("fee_cost", "0") or "0")),
                 ts=datetime.fromisoformat(f["created_time"].replace("Z", "+00:00"))
                 if f.get("created_time") else datetime.now(timezone.utc),
                 raw=f,
@@ -337,18 +406,15 @@ class KalshiClient:
     def get_settlements(self, market_ticker: str) -> list[Settlement]:
         raw = self._req("GET", f"/portfolio/settlements?ticker={market_ticker}",
                         auth_required=True)
-        out = []
-        for s in raw.get("settlements", []):
-            result = s.get("market_result", "")
-            out.append(Settlement(
-                market_ticker=s.get("ticker", market_ticker),
-                result=result if result in ("yes", "no") else "void",
-                settled_ts=datetime.fromisoformat(s["settled_time"].replace("Z", "+00:00"))
-                if s.get("settled_time") else None,
-                revenue_cents=dollars_to_cents(s.get("revenue_dollars", "0") or "0"),
-                raw=s,
-            ))
-        return out
+        return [_parse_settlement(s, market_ticker)
+                for s in raw.get("settlements", [])]
+
+    def get_recent_settlements(self, limit: int = 20) -> list[Settlement]:
+        """Most-recent settlements across ALL markets (no ticker filter) —
+        the data behind Kalshi's History tab. Read-only. Newest first."""
+        raw = self._req("GET", f"/portfolio/settlements?limit={int(limit)}",
+                        auth_required=True)
+        return [_parse_settlement(s) for s in raw.get("settlements", [])]
 
     # --- orders ---
 
@@ -384,7 +450,16 @@ class KalshiClient:
             if isinstance(e, (KalshiAuthError, KalshiRateLimitError)):
                 raise
             raise KalshiOrderRejected(str(e)) from e
-        return self._order_result(raw.get("order", raw))
+        result = self._order_result(raw.get("order", raw))
+        # The response prices fills in yes-book terms regardless of req.side
+        # (the v2 book is yes-only). Flip a NO order's average back to
+        # no-cents so callers always get the price of what they actually
+        # traded — recording the yes-terms number as a NO entry/exit price
+        # sign-flipped every NO trade's naive pnl and stop-loss math (found
+        # 2026-07-29 reconciling vault trade notes against real fills).
+        if req.side == "no" and result.avg_fill_price is not None:
+            result.avg_fill_price = 100 - result.avg_fill_price
+        return result
 
     def cancel_order(self, order_id: str) -> OrderResult:
         raw = self._req("DELETE", f"/portfolio/orders/{order_id}", auth_required=True)
