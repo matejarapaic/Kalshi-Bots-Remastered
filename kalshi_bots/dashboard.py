@@ -155,8 +155,13 @@ def create_app(orchestrator):
         else:
             w = getattr(getattr(orchestrator, "monitor", None),
                         "current_window", None)
+            # per-ticker health (snapshot present, no seq gap, fresh update),
+            # not just .connected — the same signal the widget shows and the
+            # trader gates on. Expect brief "degraded" blips at window
+            # rollover until the new ticker's first snapshot arrives; the
+            # docstring's "degraded is not down" covers exactly that.
             checks["kalshi_ws"] = bool(
-                book.health(w.market_ticker if w else "").connected)
+                book.health(w.market_ticker if w else "").healthy)
         checks["window_resolved"] = getattr(
             getattr(orchestrator, "monitor", None), "current_window", None) is not None
         halted, halt_reason = orchestrator.risk.halted()

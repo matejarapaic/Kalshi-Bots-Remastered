@@ -132,6 +132,27 @@ def test_health_endpoint_reports_degraded_and_ok():
     assert h["checks"]["not_halted"] is True
 
 
+def test_health_kalshi_ws_uses_per_ticker_health_not_connected():
+    """Regression: /health tested only .connected, so a WS that was up but
+    had no snapshot for the active ticker (or a seq gap, or a stale book)
+    reported ok while the widget — and the trader's gates — saw unhealthy.
+    The rollover state (connected, subscribed, no first update yet) must
+    read degraded."""
+    from kalshi_bots.types import BookHealth
+
+    class RolloverBook:
+        def health(self, ticker):
+            return BookHealth(market_ticker=ticker, connected=True,
+                              subscribed=True, last_update_age_s=None,
+                              seq_gap=False, healthy=False)
+
+    orch = FakeOrchestrator()
+    orch.book = RolloverBook()
+    h = TestClient(create_app(orch)).get("/health").json()
+    assert h["checks"]["kalshi_ws"] is False
+    assert h["status"] == "degraded"
+
+
 class FakeBroker:
     def __init__(self, yes_bid=55):
         self.yes_bid = yes_bid
