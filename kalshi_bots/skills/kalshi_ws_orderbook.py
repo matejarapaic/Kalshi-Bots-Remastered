@@ -58,6 +58,10 @@ class _BookState:
     seq_gap: bool = False
     have_snapshot: bool = False
     last_update_mono: float | None = None
+    # watchdog pacing: monotonic time of the last recovery attempt (the
+    # initial subscribe counts as one, so the watchdog waits a full interval
+    # before its first retry)
+    last_recover_mono: float = field(default_factory=time.monotonic)
 
 
 def _parse_side(levels: list | None) -> dict[int, float]:
@@ -104,6 +108,7 @@ class KalshiOrderBook:
         self._connected = False
         self._lock = threading.Lock()
         self._task: asyncio.Task | None = None
+        self._watchdog: asyncio.Task | None = None
         self._ws = None
         self._stopping = False
         self._cmd_id = 0
@@ -116,13 +121,16 @@ class KalshiOrderBook:
             raise KalshiWsError("orderbook client already started")
         self._stopping = False
         self._task = asyncio.create_task(self._run(), name="kalshi-ws")
+        self._watchdog = asyncio.create_task(self._watch(),
+                                             name="kalshi-ws-watchdog")
 
     async def stop(self) -> None:
         self._stopping = True
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+        for t in (self._task, self._watchdog):
+            if t is not None:
+                t.cancel()
+                await asyncio.gather(t, return_exceptions=True)
+        self._task = self._watchdog = None
 
     async def _run(self) -> None:
         import orjson
@@ -151,6 +159,41 @@ class KalshiOrderBook:
                 return
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, RECONNECT_MAX_BACKOFF_S)
+
+    def _states_needing_recovery(self, mono: float | None = None) -> list[_BookState]:
+        """Structurally broken subscriptions: never received their snapshot
+        (subscribe raced the market's WS availability at window open, cmd
+        errored, or the snapshot message was lost — found live 2026-07-30:
+        connected+subscribed for 9 minutes with no book while REST showed a
+        1c-spread market) or stuck with a seq gap. A *quiet* book (snapshot
+        held, just no deltas) is NOT broken — thin-market staleness must keep
+        reading unhealthy so the self-throttle works; the watchdog never
+        touches it. Paced per state by STALE_BOOK_S."""
+        mono = time.monotonic() if mono is None else mono
+        with self._lock:
+            if not self._connected:
+                return []  # reconnect path already resubscribes everything
+            out = []
+            for st in self._books.values():
+                broken = not st.have_snapshot or st.seq_gap
+                if broken and mono - st.last_recover_mono >= STALE_BOOK_S:
+                    st.last_recover_mono = mono
+                    out.append(st)
+            return out
+
+    async def _watch(self) -> None:
+        while not self._stopping:
+            await asyncio.sleep(STALE_BOOK_S)
+            for st in self._states_needing_recovery():
+                log.warning("book %s subscribed but broken (snapshot=%s "
+                            "seq_gap=%s) — recovering",
+                            st.market.market_ticker, st.have_snapshot,
+                            st.seq_gap)
+                try:
+                    await self._request_resnapshot(st)
+                except Exception as e:
+                    log.warning("recovery for %s failed (will retry): %s",
+                                st.market.market_ticker, e)
 
     def _mark_disconnected(self) -> None:
         self._ws = None
