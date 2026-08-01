@@ -65,6 +65,7 @@ BRTI is computed every 200ms from a consolidated, size-capped, uncrossed, depth-
 
 ### Reconnection
 10. Each constituent runs an independent connect/subscribe/read loop with exponential backoff (1s doubling to `RECONNECT_MAX_BACKOFF_S`). Reconnects are per-venue; one venue flapping never touches the others. `stop()` cancels all tasks and is idempotent-safe to call once.
+11. `ConstituentSpec.ping_interval` (default 20s, the `websockets` library default) is a per-venue override for client-initiated WS keepalive pings, passed straight through to `websockets.connect`. LMAX sets it to `None` (found live 2026-07-30): its server was closing with `1008 policy violation: Excessive pings received` against the library's default ping cadence, causing repeated reconnects that flapped it in and out of `STALE_CONSTITUENT_S` health. Disabling the client ping for LMAX is safe because liveness there is still covered by this skill's own staleness check (last-tick age), independent of WS-level ping/pong.
 
 ## Configuration
 | Parameter | Default | Notes |

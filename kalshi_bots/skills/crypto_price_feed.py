@@ -69,6 +69,10 @@ class ConstituentSpec:
     ws_url: str
     subscribe: dict | None       # JSON payload sent on connect; None = none needed
     parse: Parser | None
+    ping_interval: float | None = 20  # None = no client-initiated pings; a
+                                       # venue's own staleness (last-tick age
+                                       # vs STALE_CONSTITUENT_S) still detects
+                                       # a dead connection independent of this
 
 
 @dataclass
@@ -243,7 +247,12 @@ def default_constituents() -> list[ConstituentSpec]:
             subscribe={"type": "SUBSCRIBE",
                        "channels": [{"name": "ORDER_BOOK",
                                      "instruments": ["btc-usd"]}]},
-            parse=parse_lmax),
+            parse=parse_lmax,
+            # LMAX's server closes with 1008 "Excessive pings received" against
+            # the websockets library's default client-side keepalive ping
+            # (found live 2026-07-30) -- disable our ping, rely on its own
+            # traffic plus our staleness check for liveness.
+            ping_interval=None),
     ]
 
 
@@ -286,7 +295,8 @@ class CryptoPriceFeed:
         while not self._stopping:
             try:
                 async with websockets.connect(spec.ws_url, open_timeout=10,
-                                              close_timeout=5) as ws:
+                                              close_timeout=5,
+                                              ping_interval=spec.ping_interval) as ws:
                     if spec.subscribe is not None:
                         await ws.send(orjson.dumps(spec.subscribe).decode())
                     scratch: dict = {}
