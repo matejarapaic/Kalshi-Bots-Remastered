@@ -387,20 +387,35 @@ class TestOverrides:
         tightened = rm_uncapped.size(req(eid="E2", ticker="T2-00"))
         assert 0 < tightened.contracts < base.contracts
 
-    def test_out_of_corridor_raises_and_applies_nothing(self):
+    def test_out_of_corridor_on_tighten_side_still_raises(self):
+        # Tighten-direction bounds are untouched by the 2026-07-30 relax
+        # change: these still reject.
         from kalshi_bots.skills import risk_management as risk_mod
         with pytest.raises(risk_mod.RiskOverrideError):
-            risk_mod.set_override("MIN_EDGE_CENTS", 3,   # below baseline: looser
+            risk_mod.set_override("MIN_EDGE_CENTS", 9,   # above 2x tighten ceiling
                                   reason="t", caller="tuner")
         assert not risk_mod.has_override("MIN_EDGE_CENTS")
-        with pytest.raises(risk_mod.RiskOverrideError):
-            risk_mod.set_override("PER_TRADE_CAP_PCT", 6,  # above baseline
-                                  skill="btc-15min-fair-value",
-                                  reason="t", caller="tuner")
         with pytest.raises(risk_mod.RiskOverrideError):
             risk_mod.set_override("TOTAL_EXPOSURE_CAP_PCT", 3,  # below 0.5x floor
                                   reason="t", caller="tuner")
         assert risk_mod.active_overrides() == {}
+
+    def test_looser_than_baseline_now_allowed_on_relax_side(self):
+        # 2026-07-30 owner-directed change: relax is no longer capped at
+        # baseline. A value looser than baseline is now a valid override on
+        # the relax side (still subject to each param's own domain floor).
+        from kalshi_bots.skills import risk_management as risk_mod
+        risk_mod.set_override("MIN_EDGE_CENTS", 3,   # below baseline (4): looser
+                              reason="t", caller="tuner")
+        assert risk_mod.current("MIN_EDGE_CENTS") == 3
+        risk_mod.set_override("PER_TRADE_CAP_PCT", 6,  # above baseline (5): looser
+                              skill="btc-15min-fair-value",
+                              reason="t", caller="tuner")
+        assert risk_mod.current("PER_TRADE_CAP_PCT",
+                                skill="btc-15min-fair-value") == 6
+        with pytest.raises(risk_mod.RiskOverrideError):
+            risk_mod.set_override("MIN_EDGE_CENTS", -1,  # domain floor: no negative edge
+                                  reason="t", caller="tuner")
 
     def test_non_tunable_names_rejected(self):
         from kalshi_bots.skills import risk_management as risk_mod
@@ -416,8 +431,17 @@ class TestOverrides:
                               reason="t", caller="tuner")
         assert risk_mod.current("SKILL_RISK_MULTIPLIER",
                                 skill="btc-15min-fair-value") == (0.5, 0.5)
+        # Above baseline (1.0) is now a valid relax-side value -- no ceiling
+        # since 2026-07-30.
+        risk_mod.set_override("SKILL_RISK_MULTIPLIER", (1.5, 1.2),
+                              skill="btc-15min-fair-value",
+                              reason="t", caller="tuner")
+        assert risk_mod.current("SKILL_RISK_MULTIPLIER",
+                                skill="btc-15min-fair-value") == (1.5, 1.2)
+        # Below the tighten floor (0.25x baseline) still rejects -- that
+        # bound is untouched by the relax change.
         with pytest.raises(risk_mod.RiskOverrideError):
-            risk_mod.set_override("SKILL_RISK_MULTIPLIER", (1.5, 1.0),
+            risk_mod.set_override("SKILL_RISK_MULTIPLIER", (0.1, 1.0),
                                   skill="btc-15min-fair-value",
                                   reason="t", caller="tuner")
 

@@ -91,19 +91,27 @@ LEDGER_PATH = "03-market-context/exposure-ledger.md"
 
 # ---------------------------------------------------------------------------
 # LIVE OVERRIDE LAYER (tuner). The tuner agent may adjust any parameter below
-# at runtime, but only inside a corridor whose ceiling is the human-approved
-# baseline above — it can make the system MORE conservative than the owner
-# signed off on, never less. `current(name, skill=None)` is the read path for
-# every tunable; the module constants stay the single source of baselines
-# (and remain monkeypatchable in tests — `current` falls back to a live
-# module lookup, never a frozen copy).
+# at runtime. `current(name, skill=None)` is the read path for every tunable;
+# the module constants stay the single source of baselines (and remain
+# monkeypatchable in tests — `current` falls back to a live module lookup,
+# never a frozen copy).
+#
+# Direction-asymmetric corridor: the *tighten* side is still a hard bound the
+# tuner can't cross. The *relax* (loosen) side has no ceiling — owner-
+# directed 2026-07-30: the tuner may push a parameter past the human-
+# confirmed baseline for as long as a winning or no-trade streak continues,
+# bounded only by each parameter's own domain (e.g. counts/percentages can't
+# go negative). This deliberately removes the "never looser than baseline"
+# backstop that used to hold here; see skills/tuner/SKILL.md for the
+# reasoning and sign-off.
 # ---------------------------------------------------------------------------
 # PROPOSED 2026-07-28: per-parameter corridors as (floor_mult, ceil_mult)
 # applied to the live baseline, measured along each parameter's conservative
-# direction — ceil 1.0 means "never looser than baseline"; the (1.0, 2.0)
-# entries tighten by *raising* (e.g. MIN_EDGE_CENTS demands more edge).
-# ENTRY_PHASES is non-numeric and deliberately not tunable. Awaiting owner
-# sign-off.
+# (tighten) direction — the (1.0, 2.0) entries tighten by *raising* (e.g.
+# MIN_EDGE_CENTS demands more edge); their relax direction now floors at 0,
+# not the 1.0 baseline multiplier shown here. Lower-is-tighter entries relax
+# upward with no ceiling. ENTRY_PHASES is non-numeric and deliberately not
+# tunable. Awaiting owner sign-off.
 TUNABLE_BOUNDS: dict[str, tuple[float, float]] = {
     "BASE_KELLY_FRACTION": (0.5, 1.0),
     "SKILL_RISK_MULTIPLIER": (0.25, 1.0),
@@ -172,10 +180,19 @@ def has_override(name: str, skill: str | None = None) -> bool:
 
 
 def _corridor(name: str, baseline):
+    """Tighten-direction bound is the configured multiplier, unchanged. The
+    relax (loosen) direction is unbounded past baseline (2026-07-30): floored
+    at 0 for raise-is-tighten params (can't require negative edge/depth/etc),
+    uncapped for lower-is-tighter params (sizing/exposure can grow past what
+    was originally authorized as streaks continue)."""
     lo_m, hi_m = TUNABLE_BOUNDS[name]
-    lo, hi = lo_m * baseline, hi_m * baseline
-    if isinstance(baseline, int):
-        lo = max(1, math.floor(lo)) if lo_m < 1.0 else lo  # count-caps floor at 1
+    if hi_m > 1.0:  # raise-is-tighten (e.g. MIN_EDGE_CENTS): hi is the tighten
+                    # bound; lo is the relax direction
+        lo, hi = 0.0, hi_m * baseline
+    else:           # lower-is-tighten: lo is the tighten bound; hi is relax
+        lo, hi = lo_m * baseline, math.inf
+        if isinstance(baseline, int):
+            lo = max(1, math.floor(lo)) if lo_m < 1.0 else lo  # count floor
     return lo, hi
 
 

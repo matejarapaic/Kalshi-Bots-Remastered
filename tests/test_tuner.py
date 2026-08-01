@@ -29,7 +29,18 @@ class TestStreakCounting:
         assert record_window(s, report(pnl=200)) == "win"
         assert record_window(s, report(trades=0, pnl=0)) == "no_trade"
         assert record_window(s, report(status="pending")) == "skipped"
-        assert record_window(s, report(drift=True)) == "skipped"
+
+    def test_drift_windows_count_toward_streaks(self):
+        # 2026-07-31 fix: constituent_drift excludes a window from win_rate
+        # learning (postmortem's concern), NOT from streak counting — real
+        # fills and settlements are valid outcome data even when our own
+        # feed blipped. The old skip zeroed the streaks permanently live.
+        s = TunerState()
+        assert record_window(s, report(pnl=-100, drift=True)) == "loss"
+        assert record_window(s, report(trades=0, drift=True)) == "no_trade"
+        assert s.loss_streak == 1
+        assert s.no_trade_streak == 1
+        assert s.windows_seen == 2
 
     def test_loss_streak_counts_and_win_resets(self):
         s = TunerState()
@@ -58,7 +69,7 @@ class TestStreakCounting:
         s = TunerState()
         record_window(s, report(pnl=-1))
         record_window(s, report(status="voided"))
-        record_window(s, report(drift=True))
+        record_window(s, report(status="pending"))
         assert s.loss_streak == 1
         assert s.windows_seen == 1
 
@@ -100,24 +111,30 @@ class TestTighten:
 
 
 class TestRelax:
-    def test_win_relaxes_and_full_relax_clears_overrides(self):
+    """Owner-directed 2026-07-30: relax is unbounded past baseline (see
+    skills/tuner/SKILL.md). These tests assert the new behavior, replacing
+    the prior "relax never crosses baseline" guarantee."""
+
+    def test_win_relaxes_past_baseline_without_clearing(self):
         s = TunerState()
         for _ in range(LOSS_STREAK_TRIGGER):
             apply_feedback(s, report(pnl=-1))
-        assert rm.active_overrides()
-        apply_feedback(s, report(pnl=50))
-        apply_feedback(s, report(pnl=50))  # STOP_LOSS needs a second step
-        assert rm.active_overrides() == {}
-        assert rm.current("MIN_EDGE_CENTS") == rm.MIN_EDGE_CENTS
-        assert not rm.has_override("SKILL_RISK_MULTIPLIER", FV)
+        assert rm.current("MIN_EDGE_CENTS") == 5          # tightened once: 4 + 1
+        for _ in range(3):
+            apply_feedback(s, report(pnl=50))
+        assert rm.current("MIN_EDGE_CENTS") == 2           # 5->4->3->2, past baseline (4)
+        assert rm.has_override("MIN_EDGE_CENTS")            # never cleared, keeps moving
 
-    def test_relax_never_crosses_baseline(self):
-        tighten_all("test")
+    def test_relax_keeps_moving_past_baseline_floored_by_domain_only(self):
         for _ in range(10):
             relax_all("test")
-        assert rm.current("PER_TRADE_CAP_PCT", skill=FV) == rm.PER_TRADE_CAP_PCT[FV]
-        assert rm.current("MIN_EDGE_CENTS") == rm.MIN_EDGE_CENTS
-        assert rm.active_overrides() == {}
+        # MIN_EDGE_CENTS can't go negative (no such thing as requiring less
+        # than zero edge) -- that's the domain floor, not a baseline clamp.
+        assert rm.current("MIN_EDGE_CENTS") == 0
+        adjustments = relax_all("test")
+        assert not any(a.param == "MIN_EDGE_CENTS" for a in adjustments)  # pinned
+        # Sizing/exposure params have no ceiling at all -- they keep growing.
+        assert rm.current("PER_TRADE_CAP_PCT", skill=FV) > rm.PER_TRADE_CAP_PCT[FV]
 
     def test_no_trade_streak_relaxes_at_trigger_multiple_only(self):
         s = TunerState()
@@ -127,14 +144,14 @@ class TestRelax:
         for _ in range(NO_TRADE_STREAK_TRIGGER - 1):
             assert apply_feedback(s, report(trades=0)) == []
         assert rm.active_overrides() == before   # untouched until the trigger
-        assert apply_feedback(s, report(trades=0)) != []  # 8th fires
+        assert apply_feedback(s, report(trades=0)) != []  # Nth (trigger) fires
 
-    def test_relax_without_overrides_is_a_noop(self):
+    def test_relax_fires_even_with_no_prior_tightening(self):
         s = TunerState()
-        assert apply_feedback(s, report(pnl=50)) == []
-        s.no_trade_streak = NO_TRADE_STREAK_TRIGGER - 1
-        assert apply_feedback(s, report(trades=0)) == []
         assert rm.active_overrides() == {}
+        adjustments = apply_feedback(s, report(pnl=50))
+        assert adjustments                                  # no longer a no-op
+        assert rm.current("MIN_EDGE_CENTS") < rm.MIN_EDGE_CENTS
 
 
 class FakeDiscord:
@@ -180,14 +197,17 @@ class TestAgent:
         tuner = Tuner(vault, env="demo")
         tuner.on_reports([report(pnl=-1) for _ in range(LOSS_STREAK_TRIGGER)])
         rm.clear_all_overrides()
-        # baseline raised since state was persisted: stored MIN_EDGE override
-        # (5) now sits below the new corridor [10, 20] and must be dropped
+        # baseline lowered since state was persisted: the stored tighten-side
+        # MIN_EDGE override (5) now exceeds the new tighten ceiling
+        # (2x baseline = 4) and must be dropped. (Relax-side values have no
+        # ceiling since 2026-07-30, so only a tighten-side violation like
+        # this one still triggers a drop-on-reload.)
         monkeypatch.setattr(
-            "kalshi_bots.skills.risk_management.MIN_EDGE_CENTS", 10)
+            "kalshi_bots.skills.risk_management.MIN_EDGE_CENTS", 2)
         fresh = Tuner(vault, env="demo")
         fresh.reload()
         assert not rm.has_override("MIN_EDGE_CENTS")
-        assert rm.current("MIN_EDGE_CENTS") == 10
+        assert rm.current("MIN_EDGE_CENTS") == 2
 
     def test_win_relax_notifies_at_info_level(self, vault):
         discord = FakeDiscord()

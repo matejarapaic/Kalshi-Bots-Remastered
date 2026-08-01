@@ -2,10 +2,12 @@
 
 Streak-driven live adjustment of risk parameters through risk-management's
 override layer. Loss streaks tighten (smaller sizing, less exposure, more
-required edge); wins and no-trade streaks relax previously-applied tightening
-back toward — never past — the human-approved baseline. All movement is
-corridor-clamped by risk_management.set_override; this module never invents
-a risk number of its own, it only steps existing ones (CONTRACTS.md rule 5).
+required edge); wins and no-trade streaks relax — and, owner-directed
+2026-07-30, keep relaxing past the human-approved baseline for as long as
+the streak continues, uncapped except by each parameter's own domain. All
+movement is corridor-clamped by risk_management.set_override; this module
+never invents a risk number of its own, it only steps existing ones
+(CONTRACTS.md rule 5).
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ log = logging.getLogger(__name__)
 # risk_management.TUNABLE_BOUNDS next to the baselines they bound.
 # ---------------------------------------------------------------------------
 LOSS_STREAK_TRIGGER = 3      # consecutive settled losing windows -> tighten
-NO_TRADE_STREAK_TRIGGER = 8  # consecutive settled tradeless windows (~2h) -> relax
+NO_TRADE_STREAK_TRIGGER = 3  # consecutive settled tradeless windows (~45m) -> relax
 TIGHTEN_STEP = 0.85          # multiplicative step for lower-is-tighter params
 EDGE_STEP_CENTS = 1          # additive step for MIN_EDGE_CENTS (raise-is-tighter)
 
@@ -55,10 +57,16 @@ class TunerState:
 
 def record_window(state: TunerState, report: PostmortemReport) -> str:
     """Update streaks from one report. Returns the window's classification:
-    'win' | 'loss' | 'no_trade' | 'skipped'. Drift-excluded and non-settled
-    windows are skipped — same exclusion rule postmortem applies to
-    win_rate learning."""
-    if report.settlement_status != "settled" or report.constituent_drift:
+    'win' | 'loss' | 'no_trade' | 'skipped'. Only non-settled windows are
+    skipped. `constituent_drift` deliberately does NOT skip a window here
+    (fixed 2026-07-31, found live): the flag means our own composite feed
+    blipped mid-window — the right reason for postmortem to exclude the
+    window from win_rate/sample_size learning, but trades_audited and
+    realized_pnl_cents come from real Kalshi fills and settlements, which
+    our feed's health can't retroactively invalidate. Reusing the flag here
+    zeroed the streaks permanently in live operation (~every window has at
+    least one 5-venue health blip), so the tuner never fired once."""
+    if report.settlement_status != "settled":
         return "skipped"
     state.windows_seen += 1
     if report.trades_audited == 0:
@@ -104,26 +112,24 @@ def _tighten_value(name: str, skill: str | None):
 
 
 def _relax_value(name: str, skill: str | None):
-    """One relax step back toward the baseline. Returns (cur, new) where new
-    is None when the override should be cleared entirely (reached baseline);
-    returns None when no override is active for this param."""
-    if not rm.has_override(name, skill):
-        return None
+    """One relax step in the loosening direction — unbounded past baseline
+    (owner-directed 2026-07-30): relaxing no longer stops once it reaches the
+    human-approved baseline, it keeps stepping past it for as long as
+    winning/no-trade streaks continue. risk_management.set_override's
+    corridor is the only remaining floor/ceiling (0 for quantities that can't
+    go negative, uncapped otherwise). Returns (cur, new) or None if the
+    param's value can't move (rounding stall)."""
     base = rm.baseline(name, skill)
     cur = rm.current(name, skill)
     if _raises_to_tighten(name):
-        new = max(base, cur - EDGE_STEP_CENTS)
-        return (cur, None) if new <= base else (cur, new)
-    if isinstance(base, tuple):
-        new = tuple(min(b, v / TIGHTEN_STEP) for b, v in zip(base, cur))
-        if all(v >= b * 0.999 for v, b in zip(new, base)):
-            return (cur, None)
-        return (cur, new)
-    if isinstance(base, int):
-        new = min(base, max(cur + 1, int(round(cur / TIGHTEN_STEP))))
+        new = cur - EDGE_STEP_CENTS
+    elif isinstance(base, tuple):
+        new = tuple(v / TIGHTEN_STEP for v in cur)
+    elif isinstance(base, int):
+        new = max(cur + 1, int(round(cur / TIGHTEN_STEP)))
     else:
-        new = min(base, cur / TIGHTEN_STEP)
-    return (cur, None) if new >= base * 0.999 else (cur, new)
+        new = cur / TIGHTEN_STEP
+    return None if new == cur else (cur, new)
 
 
 def _policy_targets():
@@ -161,16 +167,12 @@ def relax_all(reason: str) -> list[ParamAdjustment]:
         if step is None:
             continue
         cur, new = step
-        if new is None:
-            rm.clear_override(name, skill)
-            new = rm.baseline(name, skill)
-        else:
-            try:
-                _, new = rm.set_override(name, new, skill=skill,
-                                         reason=reason, caller="tuner")
-            except rm.RiskError as e:
-                log.warning("tuner relax rejected for %s[%s]: %s", name, skill, e)
-                continue
+        try:
+            _, new = rm.set_override(name, new, skill=skill,
+                                     reason=reason, caller="tuner")
+        except rm.RiskError as e:
+            log.warning("tuner relax rejected for %s[%s]: %s", name, skill, e)
+            continue
         out.append(ParamAdjustment(param=name, skill=skill, old_value=cur,
                                    new_value=new, reason=reason, ts=now))
     return out

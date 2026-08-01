@@ -1,10 +1,12 @@
 """tuner agent. Prompt: vault 01-agents/tuner/system-prompt.md.
 
 Consumes settled-window postmortem reports and adjusts risk parameters live
-through risk-management's override layer (tighten on loss streaks, relax back
-toward baseline on wins / no-trade streaks). Never places orders, never
-sizes, never writes skill stats — the streak policy itself lives in
-skills/tuner.py; this wrapper only persists state and announces changes.
+through risk-management's override layer: tighten on loss streaks; wins and
+no-trade streaks relax, and — owner-directed 2026-07-30 — keep relaxing past
+the human-approved baseline for as long as the streak continues. Never
+places orders, never sizes, never writes skill stats — the streak policy
+itself lives in skills/tuner.py; this wrapper only persists state and
+announces changes.
 """
 from __future__ import annotations
 
