@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from kalshi_bots.skills.fair_value_model import (
-    FairValueError, evaluate, fair_value_prob, side_edges,
+    FairValueError, evaluate, fair_value_prob, moneyness_sigmas, side_edges,
 )
 from kalshi_bots.types import CompositeSpot, MarketRef, OrderbookSnapshot, WindowRef
 
@@ -136,3 +136,40 @@ class TestSideEdges:
         est = evaluate(window(), spot(), b, sigma=0.6, now=NOW)
         edges = side_edges(est, b)
         assert edges["no"] is None and edges["yes"] is not None
+
+
+class TestMoneynessSigmas:
+    def test_at_the_money_is_zero(self):
+        est = evaluate(window(strike=66000.0), spot(mid=66000.0), book(),
+                       sigma=0.6, now=NOW)
+        assert moneyness_sigmas(est) == pytest.approx(0.0, abs=1e-9)
+
+    def test_matches_the_zscore_that_feeds_p_up(self):
+        # moneyness is |Phi^-1(p_up)| by construction; verify it inverts p_up
+        est = evaluate(window(strike=65900.0), spot(mid=66000.0), book(),
+                       sigma=0.6, now=NOW)
+        z = moneyness_sigmas(est)
+        # reconstruct p_up = Phi(z) from the distance and compare
+        recon = 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+        assert recon == pytest.approx(est.model_prob_up, abs=1e-9)
+        assert z > 0  # spot above strike -> off the money
+
+    def test_symmetric_above_and_below_strike(self):
+        up = moneyness_sigmas(evaluate(window(strike=66000.0), spot(mid=66000.0 * 1.001),
+                                       book(), sigma=0.6, now=NOW))
+        dn = moneyness_sigmas(evaluate(window(strike=66000.0), spot(mid=66000.0 / 1.001),
+                                       book(), sigma=0.6, now=NOW))
+        assert up == pytest.approx(dn, rel=1e-6)
+
+    def test_a_few_dollars_off_65k_is_near_zero_sigma(self):
+        # the 2026-07-24 coin-flip signature: ~$20 gap at mid-window is well
+        # under half a sigma, so the ATM guard (0.5) must reject it
+        est = evaluate(window(strike=65349.84), spot(mid=65369.90), book(),
+                       sigma=0.20, now=NOW)
+        assert moneyness_sigmas(est) < 0.5
+
+    def test_degenerate_distribution_is_infinite(self):
+        est = evaluate(window(strike=66000.0), spot(mid=66000.0), book(),
+                       sigma=0.6, now=NOW)
+        est.sigma_used = 0.0  # settled / zero-vol -> deterministic, not a coin flip
+        assert moneyness_sigmas(est) == float("inf")

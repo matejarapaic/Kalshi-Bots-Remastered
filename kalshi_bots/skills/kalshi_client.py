@@ -402,10 +402,16 @@ class KalshiClient:
                 # for one 3-lot order) — int() truncation undercounted them
                 contracts=round(float(f.get("count_fp", f.get("count", 0)))),
                 price=price,
-                # live fills carry the fee as `fee_cost` (verified 2026-07-29);
-                # the previously-read `taker_fees_dollars` exists only on
-                # order objects, so every fill's fee silently parsed as 0
-                taker_fee_cents=abs(dollars_to_cents(f.get("fee_cost", "0") or "0")),
+                # Live fill payloads carry the fee as `fee_cost` (dollar string,
+                # sibling to yes/no_price_dollars) — NOT `taker_fees_dollars`,
+                # which only exists on the *order* object (_order_result). Reading
+                # the wrong key silently left taker_fee_cents=0, dropping real fees
+                # from the ledger's cost basis and P&L (verified live 2026-07-24
+                # and independently 2026-07-29; same class as the settlement
+                # revenue field fix). Fallback to the old key kept purely for
+                # safety.
+                taker_fee_cents=abs(dollars_to_cents(
+                    f.get("fee_cost", f.get("taker_fees_dollars", "0")) or "0")),
                 ts=datetime.fromisoformat(f["created_time"].replace("Z", "+00:00"))
                 if f.get("created_time") else datetime.now(timezone.utc),
                 raw=f,

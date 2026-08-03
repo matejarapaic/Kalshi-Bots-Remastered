@@ -3,8 +3,10 @@ from datetime import datetime, timezone
 import pytest
 
 from kalshi_bots.skills.risk_management import (
-    RiskManager, RiskError, RiskUnknownSkill, kelly_fraction,
+    MIN_EDGE_CENTS, RiskManager, RiskError, RiskUnknownSkill, kelly_fraction,
+    required_edge_cents,
 )
+from kalshi_bots.skills.kalshi_client import est_fee_cents
 from kalshi_bots.skills.vault import Vault
 from kalshi_bots.types import (
     CryptoSignal, Fill, MarketRef, Settlement, SizingRequest, WindowRef,
@@ -75,6 +77,27 @@ def rm_uncapped(rm, monkeypatch):
     monkeypatch.setattr(
         "kalshi_bots.skills.risk_management.MAX_CONTRACTS_PER_WINDOW", 10_000)
     return rm
+
+
+class TestRequiredEdgeCents:
+    def test_at_the_money_clears_round_trip_fee(self):
+        # 50c coin flip: per-side taker fee is 2c, round-trip 4c, +1c buffer
+        # = 5c, which exceeds the flat 4c floor -> the fee-aware bar wins
+        assert required_edge_cents(50) == 2 * est_fee_cents(1, 50) + 1
+        assert required_edge_cents(50) == 5
+
+    def test_deep_wings_fall_back_to_flat_floor(self):
+        # at 10c the round-trip fee (1c*2) + buffer = 3c < MIN_EDGE_CENTS floor
+        assert required_edge_cents(10) == MIN_EDGE_CENTS
+
+    def test_never_below_the_flat_floor(self):
+        for price in range(1, 100):
+            assert required_edge_cents(price) >= MIN_EDGE_CENTS
+
+    def test_fee_bar_is_highest_at_the_money(self):
+        # the quadratic fee peaks at 50c, so the required edge should too
+        assert required_edge_cents(50) >= required_edge_cents(25)
+        assert required_edge_cents(50) >= required_edge_cents(75)
 
 
 class TestKellyMath:

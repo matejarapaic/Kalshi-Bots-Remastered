@@ -245,6 +245,24 @@ class TestEntryPath:
         assert r.startswith("declined:entry_verification_failed")
         assert "edge_ge_min" in r
 
+    def test_at_the_money_declined(self, vault):
+        # spot == strike -> model is a coin flip (z=0). Even with a cheap ask
+        # that clears the edge bar, the ATM guard must refuse it.
+        t = make_trader(vault, feed=FakeFeed(mid=66000.0),
+                        book=FakeBook(snapshot(yes_ask=40, no_ask=60)))
+        r = t.handle_signal(signal(w=window(strike=66000.0)), now=NOW)
+        assert r.startswith("declined:entry_verification_failed")
+        assert "not_at_the_money" in r
+        assert "edge_ge_min" not in r  # the edge itself was fine; ATM is why
+
+    def test_fee_aware_edge_floor_declines_near_flat_threshold(self, vault):
+        # model ~71.9c, ask 67c -> edge ~4.9c: clears the old flat 4c floor but
+        # not the fee-aware 5c bar (round-trip taker fee + 1c buffer at 67c).
+        t = make_trader(vault, book=FakeBook(snapshot(yes_ask=67, no_ask=40)))
+        r = t.handle_signal(signal(), now=NOW)
+        assert r.startswith("declined:entry_verification_failed")
+        assert "edge_ge_min" in r
+
     def test_near_close_phase_declined(self, vault):
         w = window(closes_in_s=100.0)  # inside near_close
         t = make_trader(vault)

@@ -497,11 +497,16 @@ class TestPlaceOrderV2:
                 contracts=1, limit_price=50, client_order_id="kb-3"))
 
 
+# Two real fill rows, captured live independently on each branch line. Both
+# encode the same field-level discovery: fees arrive as `fee_cost` (a dollar
+# string) — NOT `taker_fees_dollars`, which exists only on the *order* object.
+# Reading the wrong key silently left taker_fee_cents=0 on every real fill,
+# so the risk ledger's cost basis and realized P&L omitted actual trading
+# fees. REAL_FILL_NO additionally pins the fractional-count_fp discovery.
+
 # Captured verbatim from the live prod account 2026-07-29 (the entry fill of
-# vault trade kb-0c1a09bb6b56). Two field-level discoveries live in here:
-# fees arrive as `fee_cost` (not `taker_fees_dollars`, which exists only on
-# order objects), and `count_fp` can be fractional.
-REAL_FILL = {
+# vault trade kb-0c1a09bb6b56).
+REAL_FILL_NO = {
     "action": "sell", "book_side": "ask", "count_fp": "2.00",
     "created_time": "2026-07-29T04:17:05.915114Z", "fee_cost": "0.031000",
     "fill_id": "8cafb0dd-40bf-72d5-b490-fd90314e66ba", "is_taker": True,
@@ -512,6 +517,17 @@ REAL_FILL = {
     "yes_price_dollars": "0.3300",
 }
 
+# Pulled live from /portfolio/fills on 2026-07-24. There is no
+# `taker_fees_dollars` key on this object.
+REAL_FILL_YES = {
+    "action": "buy", "book_side": "yes", "count_fp": "4.00",
+    "created_time": "2026-07-24T00:42:05.833916Z", "fee_cost": "0.070000",
+    "fill_id": "f1", "is_taker": True, "market_ticker": "KXBTC15M-26JUL222130-30",
+    "no_price_dollars": "0.5100", "order_id": "e0ca763f", "outcome_side": "yes",
+    "side": "yes", "subaccount_number": 0, "ticker": "KXBTC15M-26JUL222130-30",
+    "trade_id": "t1", "ts": 1784336830522, "yes_price_dollars": "0.4900",
+}
+
 
 class TestGetFills:
     def _client(self, monkeypatch, fills):
@@ -519,7 +535,7 @@ class TestGetFills:
         monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
         monkeypatch.delenv("KALSHI_KEY_PATH", raising=False)
         c = KalshiClient()
-        c._key_id, c._private_key = "kid", object()
+        c._key_id, c._private_key = "kid", object()  # bypass auth_required gate
         c._headers = lambda method, path: {}
         monkeypatch.setattr(c.session, "request", lambda *a, **k:
                             _FakeResponse(200, {"fills": fills}))
@@ -529,17 +545,37 @@ class TestGetFills:
         """Regression: the parser read `taker_fees_dollars`, a field real
         fills don't carry, so every live fill's fee parsed as 0 and the
         exposure ledger's cost basis was silently fee-blind."""
-        c = self._client(monkeypatch, [REAL_FILL])
+        c = self._client(monkeypatch, [REAL_FILL_NO])
         f = c.get_fills("KXBTC15M-26JUL290030-30")[0]
         assert f.taker_fee_cents == 3  # 0.031 dollars
         assert f.price == 67           # no-side fill reads no_price_dollars
         assert f.contracts == 2
 
+    def test_yes_side_real_fill_reports_the_actual_fee(self, monkeypatch):
+        c = self._client(monkeypatch, [REAL_FILL_YES])
+        fills = c.get_fills()
+        assert len(fills) == 1
+        f = fills[0]
+        assert f.contracts == 4
+        assert f.price == 49  # yes side -> yes_price_dollars
+        assert f.taker_fee_cents == 7  # was silently 0 before the fee_cost fix
+
     def test_fractional_count_fp_rounds_instead_of_truncating(self, monkeypatch):
         """Live orders split into fractional fills (a real 3-lot came back
         as count_fp 2.05 + 0.95); int() truncation turned 0.95 into 0."""
-        a = dict(REAL_FILL, count_fp="2.05")
-        b = dict(REAL_FILL, count_fp="0.95")
+        a = dict(REAL_FILL_NO, count_fp="2.05")
+        b = dict(REAL_FILL_NO, count_fp="0.95")
         c = self._client(monkeypatch, [a, b])
         fills = c.get_fills("KXBTC15M-26JUL290030-30")
         assert [f.contracts for f in fills] == [2, 1]
+
+    def test_fee_cost_missing_falls_back_to_zero(self, monkeypatch):
+        no_fee = {k: v for k, v in REAL_FILL_YES.items() if k != "fee_cost"}
+        c = self._client(monkeypatch, [no_fee])
+        assert c.get_fills()[0].taker_fee_cents == 0
+
+    def test_legacy_taker_fees_dollars_still_read_as_fallback(self, monkeypatch):
+        legacy = {k: v for k, v in REAL_FILL_YES.items() if k != "fee_cost"}
+        legacy["taker_fees_dollars"] = "0.070000"
+        c = self._client(monkeypatch, [legacy])
+        assert c.get_fills()[0].taker_fee_cents == 7

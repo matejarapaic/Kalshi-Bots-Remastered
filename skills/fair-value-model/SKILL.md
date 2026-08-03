@@ -30,6 +30,7 @@ def evaluate(window: WindowRef, spot: CompositeSpot,
              now: datetime | None = None) -> FairValueEstimate
 def side_edges(est: FairValueEstimate,
                book: OrderbookSnapshot | None) -> dict[str, float | None]
+def moneyness_sigmas(est: FairValueEstimate) -> float
 ```
 
 Exceptions: `FairValueError` — raised only for genuinely broken inputs (nonpositive spot/strike, missing strike). Degenerate-but-meaningful inputs never raise (Behavior 2).
@@ -41,17 +42,18 @@ Exceptions: `FairValueError` — raised only for genuinely broken inputs (nonpos
 3. `evaluate` requires `window.strike` (raises without — callers gate upstream) and produces the full `FairValueEstimate` bundle; with no book, `market_ask_cents`/`edge_cents` are `None` — consumers fail closed on `None`, they never substitute a guess.
 4. `side_edges` prices each side against **its own ask** (`model_prob_side × 100 − side_ask`): with a spread the two edges are not mirror images — each side pays its own crossing cost; with zero spread they mirror exactly. A missing ask (one-sided book) yields `None` for that side.
 5. Who calls what: the window-monitor agent calls `evaluate`+`side_edges` to *flag* candidates (edge ≥ `MIN_EDGE_CENTS`, throttled); the trader recomputes both from fresh inputs at decision time and never trusts the flag's payload; exits recompute again per tick. Same functions, three call sites, zero shared state.
+6. `moneyness_sigmas` returns `|ln(spot/strike)| / (sigma·sqrt(tau))` — the magnitude of the z-score that feeds `p_up` (`p_up = Phi(z)`), i.e. how far the strike sits from spot in standard deviations of the settlement distribution. `0.0` == at-the-money (a coin flip); larger == real directional conviction; `+inf` for a degenerate (settled/zero-vol) distribution, which is deterministic rather than a coin flip. The trader gates near-ATM entries on this against `risk-management.ATM_MIN_SIGMA_DISTANCE` (2026-07-24 postmortem: the losers clustered a few dollars from the strike, where the drift-zero model is most fragile). This skill only computes the distance — the threshold and the decision live in `risk-management`.
 
 ## Configuration
 | Parameter | Value | Notes |
 |---|---|---|
 | `SECONDS_PER_YEAR` | 31_536_000 | must equal crypto-price-feed's base |
 
-All *trading* thresholds that consume this model (`MIN_EDGE_CENTS`, `EXIT_EDGE_CENTS`, `SIGMA_PLAUSIBLE_*`, `ENTRY_PHASES`, depth gates) live in `risk-management`'s table, not here — this skill computes, it never decides.
+All *trading* thresholds that consume this model (`MIN_EDGE_CENTS`, `EXIT_EDGE_CENTS`, `SIGMA_PLAUSIBLE_*`, `ENTRY_PHASES`, `ATM_MIN_SIGMA_DISTANCE`, depth gates) live in `risk-management`'s table, not here — this skill computes, it never decides.
 
 ## Edge cases
 - **Sub-second `tau`:** the formula stays finite to arbitrarily small positive tau; probabilities saturate toward 0/1 naturally. The near-close no-entry rule exists because the *book* misbehaves there, not the math.
-- **Spot exactly at strike late in the window:** p hovers at 0.5 with huge gamma — edges flap sign tick to tick. The entry-phase gate and the candidate cooldown keep this from churning signals.
+- **Spot exactly at strike late in the window:** p hovers at 0.5 with huge gamma — edges flap sign tick to tick. The entry-phase gate, the candidate cooldown, and the `moneyness_sigmas` ATM guard keep this from churning signals or trading coin-flips.
 - **Sigma from a different window than tau:** callers may pass any sigma window (default 900s); mixing a 60s sigma with a 900s horizon is a modeling *choice* (vol-spike skill territory), not an error — the estimate records `sigma_used` so postmortems can attribute it.
 
 ## Dependencies

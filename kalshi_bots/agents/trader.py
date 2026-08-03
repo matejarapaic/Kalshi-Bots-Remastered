@@ -16,11 +16,17 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from kalshi_bots.skills.fair_value_model import evaluate, side_edges
+from kalshi_bots.skills.fair_value_model import (
+    evaluate, moneyness_sigmas, side_edges,
+)
 from kalshi_bots.skills.kalshi_client import depth_within
 # read via current() at decision time, not frozen at import — the tuner may
-# adjust these live (skills/risk-management/SKILL.md, "Live overrides")
-from kalshi_bots.skills.risk_management import ENTRY_PHASES, current
+# adjust these live (skills/risk-management/SKILL.md, "Live overrides").
+# ATM_MIN_SIGMA_DISTANCE is not tunable, so it imports directly;
+# required_edge_cents reads current("MIN_EDGE_CENTS") internally.
+from kalshi_bots.skills.risk_management import (
+    ATM_MIN_SIGMA_DISTANCE, ENTRY_PHASES, current, required_edge_cents,
+)
 from kalshi_bots.skills.skill_matcher import SkillMatcher
 from kalshi_bots.skills.window_monitor import (
     WINDOW_S, parse_market_ticker, window_phase,
@@ -274,7 +280,19 @@ class Trader:
             side = "yes" if (edges["yes"] if edges["yes"] is not None else -999) \
                 >= (edges["no"] if edges["no"] is not None else -999) else "no"
             edge = edges[side]
-            c["edge_ge_min"] = edge is not None and edge >= current("MIN_EDGE_CENTS")
+            price = snapshot.yes_ask if side == "yes" else snapshot.no_ask
+            # fee-aware edge floor: the modeled edge must clear round-trip
+            # taker fees + slippage, not merely the flat MIN_EDGE_CENTS. Fees
+            # peak at the money, exactly where thin edges are least reliable.
+            # required_edge_cents reads current("MIN_EDGE_CENTS"), so the
+            # tuner's live edge adjustments still apply.
+            min_edge = (required_edge_cents(price) if price is not None
+                        else current("MIN_EDGE_CENTS"))
+            c["edge_ge_min"] = edge is not None and edge >= min_edge
+            # at-the-money guard: refuse coin-flips where a few dollars of spot
+            # noise flips the model's answer (2026-07-24 postmortem: the losers
+            # clustered here). moneyness in settlement-distribution stddevs.
+            c["not_at_the_money"] = moneyness_sigmas(est) >= ATM_MIN_SIGMA_DISTANCE
             c["phase_allowed"] = window_phase(now, window) in ENTRY_PHASES
             min_depth = current("MIN_DEPTH_WITHIN_5C")
             c["depth_both_sides"] = (
@@ -283,7 +301,6 @@ class Trader:
             c["spot_healthy"] = spot.constituents_healthy >= 2
             c["sigma_plausible"] = (current("SIGMA_PLAUSIBLE_MIN") <= sigma
                                     <= current("SIGMA_PLAUSIBLE_MAX"))
-            price = snapshot.yes_ask if side == "yes" else snapshot.no_ask
             c["ask_available"] = price is not None
             model_prob = (est.model_prob_up if side == "yes"
                           else est.model_prob_down)
