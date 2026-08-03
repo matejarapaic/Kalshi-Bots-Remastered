@@ -45,7 +45,7 @@ Implemented as module-level constants in `kalshi_bots/skills/risk_management.py`
 | `MAX_CONTRACTS_PER_WINDOW` | 20 | hard contract cap per 15-min window — draft-skill training wheels |
 | `MIN_EDGE_CENTS` | 4 | fair-value entry: model-vs-ask divergence required (trader + monitor read it here) |
 | `EXIT_EDGE_CENTS` | 1 | fair-value exit: held-side edge at/below this = thesis played out |
-| `SIGMA_PLAUSIBLE_MIN/MAX` | 0.20 / 2.00 | annualized vol band outside which the model is not trusted |
+| `SIGMA_PLAUSIBLE_MIN/MAX` | 0.18 / 2.00 | annualized vol band outside which the model is not trusted (MIN lowered from 0.20 2026-08-02, owner override — the original 0.20 was an unfit illustrative example from the pivot brief; median observed sigma across documented windows is 0.187) |
 | `MIN_DEPTH_WITHIN_5C` | 100 | entry gate: contracts within 5¢, each side |
 | `DEPTH_COLLAPSE_FRACTION` | 0.5 | exit when either side < `MIN_DEPTH_WITHIN_5C ×` this |
 | `ENTRY_PHASES` | `("midpoint",)` | no entries in opening or near_close |

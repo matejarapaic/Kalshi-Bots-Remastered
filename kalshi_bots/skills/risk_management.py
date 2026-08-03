@@ -55,7 +55,14 @@ MAX_CONTRACTS_PER_WINDOW = 20      # CONFIRMED 2026-07-22: hard contract cap
 # single machine home for the numbers)
 MIN_EDGE_CENTS = 4                 # model-vs-ask divergence required to enter
 EXIT_EDGE_CENTS = 1                # edge below this = thesis played out, exit
-SIGMA_PLAUSIBLE_MIN = 0.20         # outside this band the model is not to be
+# CONFIRMED 2026-08-02 (owner override, direct instruction): floor lowered
+# 0.20 -> 0.18. The 0.20 floor was never fit to this system's own data — it
+# came from the original pivot brief's illustrative "e.g. 20%-200%" example
+# and was implemented literally. Across the 47 documented windows to date,
+# median realized sigma is 0.187 and 55% fall below 0.20, so the floor was
+# rejecting the market's typical vol regime, not just broken-feed/degenerate
+# readings.
+SIGMA_PLAUSIBLE_MIN = 0.18         # outside this band the model is not to be
 SIGMA_PLAUSIBLE_MAX = 2.00         # trusted (broken feed or unmodeled regime)
 MIN_DEPTH_WITHIN_5C = 100          # contracts, EACH side, entry gate
 DEPTH_COLLAPSE_FRACTION = 0.5      # exit when either side falls below
