@@ -3,10 +3,13 @@
 Consumes settled-window postmortem reports and adjusts risk parameters live
 through risk-management's override layer: tighten on loss streaks; wins and
 no-trade streaks relax, and — owner-directed 2026-07-30 — keep relaxing past
-the human-approved baseline for as long as the streak continues. Never
-places orders, never sizes, never writes skill stats — the streak policy
-itself lives in skills/tuner.py; this wrapper only persists state and
-announces changes.
+the human-approved baseline for as long as the streak continues. All of it
+is session-scoped (owner-directed 2026-08-02): every orchestrator start
+resets every parameter to its human-approved baseline via `reset()` — the
+previous session's overrides and streaks are discarded, never re-applied.
+Never places orders, never sizes, never writes skill stats — the streak
+policy itself lives in skills/tuner.py; this wrapper only persists state
+and announces changes.
 """
 from __future__ import annotations
 
@@ -40,31 +43,40 @@ class Tuner:
         self.state = TunerState()
         self.changelog: deque[ParamAdjustment] = deque(maxlen=CHANGELOG_MAX)
 
-    # --- restart recovery ---
+    # --- session boundary ---
 
-    def reload(self) -> None:
-        """Restore streak counters and re-apply persisted overrides. An
-        override the corridor no longer accepts (baseline edited since) is
-        dropped with a warning, never force-applied."""
+    def reset(self) -> None:
+        """Every session starts at baseline (owner-directed 2026-08-02):
+        tuner adjustments never survive a restart. Overrides persisted by
+        the previous session are discarded — never re-applied — and the
+        streak counters and sigma-floor session memory start fresh (they
+        exist to justify the overrides; replaying them against baseline
+        values would fire stale adjustments). The state note is rewritten
+        clean immediately so it never advertises overrides that are no
+        longer live. End-of-session needs no hook of its own: overrides
+        live in risk-management module memory and die with the process."""
+        discarded: dict = {}
         try:
             note = self.vault.read_note(STATE_PATH)
+            discarded = dict(note.frontmatter.get("active_overrides") or {})
         except Exception:
-            return  # fresh state
-        fm = note.frontmatter
-        self.state.loss_streak = int(fm.get("loss_streak") or 0)
-        self.state.no_trade_streak = int(fm.get("no_trade_streak") or 0)
-        self.state.windows_seen = int(fm.get("windows_seen") or 0)
-        for v in (fm.get("recent_sigmas") or []):
-            self.state.recent_sigmas.append(float(v))
-        for key, value in (fm.get("active_overrides") or {}).items():
-            name, _, skill = key.partition("|")
-            if isinstance(value, list):
-                value = tuple(value)
-            try:
-                rm.set_override(name, value, skill=skill or None,
-                                reason="restart re-apply", caller="tuner")
-            except rm.RiskError as e:
-                log.warning("stored override %s dropped on reload: %s", key, e)
+            pass  # no prior state note — nothing to discard
+        rm.clear_all_overrides()
+        self.state = TunerState()
+        self.changelog.clear()
+        if discarded:
+            names = ", ".join(sorted(discarded))
+            log.warning(
+                "tuner session reset: discarded %d persisted override(s) "
+                "from the previous session — all parameters back to "
+                "baseline: %s", len(discarded), names)
+            if self.discord is not None:
+                self.discord.notify(
+                    f"⚙ **TUNER** — session reset: {len(discarded)} "
+                    f"override(s) from the previous session discarded, all "
+                    f"parameters back to baseline: {names}",
+                    level="warning")
+        self._persist()
 
     # --- per-tick entry point (orchestrator, after analyst.poll_pending) ---
 

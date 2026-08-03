@@ -193,10 +193,16 @@ class Orchestrator:
                                env=self.mode,
                                paper_broker=self.broker if paper else None)
         self.tuner = Tuner(self.vault, discord=self.discord, env=self.mode)
+        # Session boundary (owner-directed 2026-08-02): every start discards
+        # the previous session's tuner overrides — parameters always begin
+        # at their human-approved baselines, never where the last session
+        # left them.
         try:
-            self.tuner.reload()
+            self.tuner.reset()
         except Exception as e:
-            log.warning("tuner state reload skipped: %s", e)
+            log.warning("tuner session reset incomplete (parameters are at "
+                        "baseline regardless — overrides never survive the "
+                        "process): %s", e)
         self.events: list[dict] = []   # dashboard feed (bounded below)
         # recent-trades cache (dashboard History table). Settlements only
         # change ~4x/hour, so a short TTL keeps /api/state off the portfolio

@@ -258,41 +258,58 @@ class TestAgent:
         assert note.frontmatter["loss_streak"] == LOSS_STREAK_TRIGGER
         assert note.frontmatter["active_overrides"]
 
-    def test_restart_round_trip_reapplies_overrides(self, vault):
+    def test_restart_resets_every_parameter_to_baseline(self, vault):
+        # Owner-directed 2026-08-02: reset() replaces the old reload()
+        # restart-re-apply — persisted overrides are discarded, never replayed.
         tuner = Tuner(vault, env="demo")
         tuner.on_reports([report(pnl=-1) for _ in range(LOSS_STREAK_TRIGGER)])
-        edge_before = rm.current("MIN_EDGE_CENTS")
-        assert edge_before > rm.MIN_EDGE_CENTS
+        assert rm.current("MIN_EDGE_CENTS") > rm.MIN_EDGE_CENTS
         rm.clear_all_overrides()  # simulate process death
         fresh = Tuner(vault, env="demo")
-        fresh.reload()
-        assert fresh.state.loss_streak == LOSS_STREAK_TRIGGER
-        assert rm.current("MIN_EDGE_CENTS") == edge_before
+        fresh.reset()
+        assert rm.active_overrides() == {}
+        assert rm.current("MIN_EDGE_CENTS") == rm.MIN_EDGE_CENTS
+        assert fresh.state.loss_streak == 0
+        assert fresh.state.windows_seen == 0
 
-    def test_reload_drops_overrides_the_corridor_no_longer_accepts(
-            self, vault, monkeypatch):
+    def test_reset_rewrites_the_state_note_clean(self, vault):
+        tuner = Tuner(vault, env="demo")
+        tuner.on_reports(
+            [report(pnl=-1, vol=0.25) for _ in range(LOSS_STREAK_TRIGGER)])
+        assert vault.read_note(STATE_PATH).frontmatter["active_overrides"]
+        rm.clear_all_overrides()
+        fresh = Tuner(vault, env="demo")
+        fresh.reset()
+        fm = vault.read_note(STATE_PATH).frontmatter
+        assert not fm.get("active_overrides")
+        assert not fm.get("loss_streak")
+        assert not fm.get("recent_sigmas")
+
+    def test_reset_announces_discarded_overrides(self, vault):
         tuner = Tuner(vault, env="demo")
         tuner.on_reports([report(pnl=-1) for _ in range(LOSS_STREAK_TRIGGER)])
         rm.clear_all_overrides()
-        # baseline lowered since state was persisted: the stored tighten-side
-        # MIN_EDGE override (5) now exceeds the new tighten ceiling
-        # (2x baseline = 4) and must be dropped. (Relax-side values have no
-        # ceiling since 2026-07-30, so only a tighten-side violation like
-        # this one still triggers a drop-on-reload.)
-        monkeypatch.setattr(
-            "kalshi_bots.skills.risk_management.MIN_EDGE_CENTS", 2)
-        fresh = Tuner(vault, env="demo")
-        fresh.reload()
-        assert not rm.has_override("MIN_EDGE_CENTS")
-        assert rm.current("MIN_EDGE_CENTS") == 2
+        discord = FakeDiscord()
+        fresh = Tuner(vault, discord=discord, env="demo")
+        fresh.reset()
+        assert discord.messages
+        assert all(level == "warning" for _, level in discord.messages)
+        assert "baseline" in discord.messages[0][0]
 
-    def test_recent_sigmas_round_trip_through_restart(self, vault):
+    def test_reset_with_no_prior_state_is_quiet(self, vault):
+        discord = FakeDiscord()
+        tuner = Tuner(vault, discord=discord, env="demo")
+        tuner.reset()
+        assert discord.messages == []
+        assert rm.active_overrides() == {}
+
+    def test_sigma_session_memory_does_not_survive_restart(self, vault):
         tuner = Tuner(vault, env="demo")
         tuner.on_reports([report(pnl=50, vol=0.21), report(pnl=50, vol=0.23)])
         rm.clear_all_overrides()
         fresh = Tuner(vault, env="demo")
-        fresh.reload()
-        assert list(fresh.state.recent_sigmas) == [0.21, 0.23]
+        fresh.reset()
+        assert list(fresh.state.recent_sigmas) == []
 
     def test_win_relax_notifies_at_info_level(self, vault):
         discord = FakeDiscord()

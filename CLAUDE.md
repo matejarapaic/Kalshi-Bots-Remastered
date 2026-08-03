@@ -40,6 +40,8 @@ pivot — nothing may hard-code BTC.
 
 - **2026-08-02: the automatic daily-loss halt is removed** (owner-directed, explicit, given after the halt zeroed all sizing following a −770¢ day on a 12,447¢ bankroll — the owner was shown the risk in writing, including its interaction with tuner-relaxed parameters, and confirmed removal over the offered raise-the-threshold alternative). `DAILY_LOSS_HALT_PCT` and the `_daily_halted` sizing check are gone; daily P&L buckets remain for reporting only. There is no daily bound on realized losses — only per-trade/per-event/total-exposure caps and the per-position stop-loss, all of which the tuner's relax path can loosen.
 
+- **2026-08-02: tuner adjustments are session-scoped** (owner-directed): every orchestrator start resets all live risk-parameter overrides to the human-approved `risk_management.py` baselines. `Tuner.reset()` (replacing the old `Tuner.reload()` restart-re-apply) discards the previous session's persisted overrides — relaxed *and* tightened, including a raised sigma floor — and zeroes the streak counters, announcing what was discarded. This bounds relax-past-baseline excursions to one process lifetime, but the flip side is real: a restart mid-loss-streak also wipes loss-driven tightening, so the system comes back at full baseline sizing. The tuner-state vault note is a within-session record only.
+
 Do not weaken any of these gates further without an explicit, direct instruction to do so.
 
 ## Commands

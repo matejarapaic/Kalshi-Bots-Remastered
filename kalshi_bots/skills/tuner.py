@@ -7,7 +7,9 @@ required edge); wins and no-trade streaks relax — and, owner-directed
 the streak continues, uncapped except by each parameter's own domain. All
 movement is corridor-clamped by risk_management.set_override; this module
 never invents a risk number of its own, it only steps existing ones
-(CONTRACTS.md rule 5).
+(CONTRACTS.md rule 5). All adjustments are session-scoped (owner-directed
+2026-08-02): agents/tuner.py's `reset()` returns every parameter to
+baseline at each orchestrator start — nothing here outlives the process.
 """
 from __future__ import annotations
 
@@ -40,9 +42,11 @@ EDGE_STEP_CENTS = 1          # additive step for MIN_EDGE_CENTS (raise-is-tighte
 # to the session's average realized vol (mean over the last
 # SIGMA_SESSION_WINDOWS settled windows that had a vol reading) if that
 # average is above the current floor. Raise-only: the tuner never lowers the
-# sigma floor — wins and no-trade streaks leave it where it is, and only an
-# owner edit/override-clear brings it back down. Corridor-clamped like
-# everything else (tighten side of TUNABLE_BOUNDS caps it at 2x baseline).
+# sigma floor — wins and no-trade streaks leave it where it is; only an
+# owner edit/override-clear or the start-of-session baseline reset
+# (agents/tuner.reset, owner-directed 2026-08-02) brings it back down.
+# Corridor-clamped like everything else (tighten side of TUNABLE_BOUNDS
+# caps it at 2x baseline).
 SIGMA_LOSS_STREAK_TRIGGER = 2   # consecutive losing windows -> sigma tighten
 SIGMA_SESSION_WINDOWS = 20      # session-average lookback, bounded deque (~5h)
 
