@@ -253,11 +253,14 @@ class TestHalts:
         r = rm.size(req())
         assert r.capped_by[-1] == "halted"
 
-    def test_daily_loss_halt(self, rm):
+    def test_daily_losses_do_not_block_sizing(self, rm):
+        # Owner-directed 2026-08-02: the automatic daily-loss halt was
+        # removed. Any realized daily loss must leave sizing unaffected.
         day = rm._et_today()
-        rm._daily_pnl[day] = -2600  # > 5% of 50k bankroll
+        rm._daily_pnl[day] = -25_000  # 50% of the 50k bankroll
         r = rm.size(req())
-        assert r.capped_by[-1] == "daily_loss_halt"
+        assert r.contracts > 0
+        assert "daily_loss_halt" not in r.capped_by
 
     def test_halt_persists_restart(self, rm, tmp_path):
         rm.set_halt(True, "manual", caller="discord")

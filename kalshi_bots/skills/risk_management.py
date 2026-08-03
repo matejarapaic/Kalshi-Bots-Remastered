@@ -99,7 +99,13 @@ VELOCITY_SIZE_SCALE = 0.5          # fraction multiplier once threshold breached
 TOTAL_EXPOSURE_CAP_PCT = 15
 PER_EVENT_EXPOSURE_CAP_PCT = 5
 CORRELATION_SCALE_SAME_EVENT = 0.5
-DAILY_LOSS_HALT_PCT = 5
+# DAILY_LOSS_HALT_PCT removed 2026-08-02 (owner-directed, explicit instruction
+# after it zeroed all sizing following the -770c/12447c session of 2026-08-02).
+# There is now NO daily bound on realized losses: a losing regime can compound
+# across all ~96 windows of a day, limited only by the per-trade/per-event/
+# total-exposure caps and per-position STOP_LOSS_PCT. Restoring the breaker
+# means re-adding the constant, the corridor entry, the _daily_halted() check
+# in _size_locked (formerly step 9), and its TestHalts coverage.
 MAX_OPEN_POSITIONS = 6
 DEPTH_CONSUMPTION_MAX = 0.25
 
@@ -147,7 +153,6 @@ TUNABLE_BOUNDS: dict[str, tuple[float, float]] = {
     "TOTAL_EXPOSURE_CAP_PCT": (0.5, 1.0),
     "PER_EVENT_EXPOSURE_CAP_PCT": (0.5, 1.0),
     "CORRELATION_SCALE_SAME_EVENT": (0.5, 1.0),
-    "DAILY_LOSS_HALT_PCT": (0.5, 1.0),
     "MAX_OPEN_POSITIONS": (0.25, 1.0),
     "DEPTH_CONSUMPTION_MAX": (0.5, 1.0),
 }
@@ -383,10 +388,6 @@ class RiskManager:
                 + sum(i["cost_cents"] for i in self._intents.values()
                       if i["skill"] == skill))
 
-    def _daily_halted(self, bankroll: int) -> bool:
-        pnl = self._daily_pnl.get(self._et_today(), 0)
-        return pnl <= -(current("DAILY_LOSS_HALT_PCT") / 100) * bankroll
-
     # --- public interface ---
 
     def size(self, req: SizingRequest) -> SizingResult:
@@ -463,11 +464,10 @@ class RiskManager:
             budget = max(0, total_room)
             capped_by.append("total_exposure_cap")
 
-        # (9) daily-loss halt (incl. manual halt)
+        # (9) halt gate — manual/reconcile halts only (the automatic
+        # daily-loss halt was removed 2026-08-02, owner-directed)
         if self._halted:
             return zero("halted")
-        if self._daily_halted(bankroll):
-            return zero("daily_loss_halt")
 
         # (10) max open positions
         self._prune_intents()
