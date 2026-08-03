@@ -189,3 +189,49 @@ class TestBrti:
 
     def test_brti_absent_before_first_tick(self):
         assert make_book(subscribed=False).brti() is None
+
+
+class TestWatchdogRecovery:
+    """Regression, found live 2026-07-30: a subscribe sent at window open
+    got no snapshot (raced the market's WS availability or the cmd errored)
+    and the book sat connected+subscribed with no data for the whole window
+    while REST showed a 1c-spread market. Nothing retried — re-snapshots
+    only fired on delta seq gaps, which need deltas to arrive at all."""
+
+    def test_never_snapshotted_state_is_selected_after_grace(self):
+        book = make_book()
+        # immediately after subscribe: inside the pacing window, leave alone
+        assert book._states_needing_recovery(mono=0.0) == []
+        st = book._books[TICKER]
+        st.last_recover_mono = 0.0
+        picked = book._states_needing_recovery(mono=STALE_BOOK_S + 0.1)
+        assert [s.market.market_ticker for s in picked] == [TICKER]
+
+    def test_selection_repaces_itself(self):
+        book = make_book()
+        book._books[TICKER].last_recover_mono = 0.0
+        assert book._states_needing_recovery(mono=STALE_BOOK_S + 1)
+        # picked once -> paced out until another full interval passes
+        assert book._states_needing_recovery(mono=STALE_BOOK_S + 2) == []
+        assert book._states_needing_recovery(mono=2 * STALE_BOOK_S + 2)
+
+    def test_quiet_book_with_snapshot_is_never_recovered(self):
+        """A held snapshot with no deltas is thin-market quiet, not broken —
+        recovering it would defeat the staleness self-throttle."""
+        book = make_book()
+        book._handle_message(snapshot_msg(), mono=0.0)
+        book._books[TICKER].last_recover_mono = 0.0
+        assert book._states_needing_recovery(mono=10 * STALE_BOOK_S) == []
+
+    def test_stuck_seq_gap_is_recovered(self):
+        book = make_book()
+        book._handle_message(snapshot_msg(seq=2), mono=0.0)
+        book._handle_message(delta_msg(seq=9), mono=1.0)  # gap
+        book._books[TICKER].last_recover_mono = 0.0
+        picked = book._states_needing_recovery(mono=STALE_BOOK_S + 1)
+        assert [s.market.market_ticker for s in picked] == [TICKER]
+
+    def test_disconnected_defers_to_reconnect_resubscribe(self):
+        book = make_book(connected=False)
+        book._books[TICKER].last_recover_mono = 0.0
+        assert book._states_needing_recovery(mono=STALE_BOOK_S + 1) == []

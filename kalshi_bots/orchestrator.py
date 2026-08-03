@@ -22,11 +22,13 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 
 from kalshi_bots.agents.analyst import Analyst
 from kalshi_bots.agents.trader import Trader
+from kalshi_bots.agents.tuner import Tuner
 from kalshi_bots.agents.window_monitor import WindowMonitor
 from kalshi_bots.env import load_env
 from kalshi_bots.paper import PaperBroker
@@ -42,6 +44,7 @@ load_env()
 log = logging.getLogger(__name__)
 
 TICK_S = 1.0  # evaluation cadence over streaming state
+RECENT_TRADES_TTL_S = 20.0  # dashboard History table refresh floor
 LIVE_FLAG = "--i-know-what-im-doing-crypto"
 LIVE_CONFIRM_PHRASE = "TRADE LIVE"
 
@@ -59,8 +62,9 @@ def live_trading_guard(vault, argv: list[str] | None = None,
          matcher's own gate independently).
     Any single missing -> SystemExit with a clear message. Even a full pass
     only *permits* startup: KalshiClient still refuses prod without
-    KALSHI_ALLOW_PROD=yes-i-mean-it, and DiscordBot refuses autonomous on
-    prod, so live trading is manual-approve by construction.
+    KALSHI_ALLOW_PROD=yes-i-mean-it. Execution mode after the guard is
+    autonomous on demo and prod alike (owner decision 2026-07-22 — no
+    per-trade approval step; exits were never approval-gated).
     """
     env = os.environ.get("KALSHI_ENV", "demo")
     if env == "demo":
@@ -89,7 +93,8 @@ def live_trading_guard(vault, argv: list[str] | None = None,
             "in the vault. Draft skills never trade live money — confirm one "
             "after >=30 settled demo samples and an owner review.")
     log.warning("LIVE TRADING GUARD PASSED: %d confirmed skill(s); execution "
-                "will be manual-approve (autonomous is demo-only)", len(notes))
+                "is AUTONOMOUS — no per-trade approval (owner decision "
+                "2026-07-22)", len(notes))
     return "live"
 
 
@@ -104,7 +109,7 @@ class Orchestrator:
         self.vault = vault or Vault()
         # paper-first: demo passes straight through; prod demands the full
         # three-gate flow (flag + typed confirmation + confirmed skill) and
-        # even then remains manual-approve + KALSHI_ALLOW_PROD-gated
+        # remains KALSHI_ALLOW_PROD-gated in the client
         self.mode = live_trading_guard(self.vault)
         env = os.environ.get("KALSHI_ENV", "demo")
         self.kalshi = KalshiClient()
@@ -125,11 +130,6 @@ class Orchestrator:
             self.risk.reconcile()
         except Exception as e:
             log.warning("startup ledger reconcile skipped: %s", e)
-        # Execution mode, owner-decided 2026-07-17: AUTONOMOUS ON DEMO ONLY.
-        # This orchestrator refuses non-demo envs at startup (above), and
-        # DiscordBot separately refuses autonomous+prod — flipping to prod
-        # requires re-answering the execution-mode question.
-        #
         # Transport cascade: GatewayTransport (full — sends + receives slash
         # commands/button clicks) > DiscordTransport (REST, send-only, if the
         # gateway can't connect) > ConsoleTransport (local log only).
@@ -192,7 +192,34 @@ class Orchestrator:
         self.analyst = Analyst(self.vault, self.broker, discord=self.discord,
                                env=self.mode,
                                paper_broker=self.broker if paper else None)
+        self.tuner = Tuner(self.vault, discord=self.discord, env=self.mode)
+        try:
+            self.tuner.reload()
+        except Exception as e:
+            log.warning("tuner state reload skipped: %s", e)
         self.events: list[dict] = []   # dashboard feed (bounded below)
+        # recent-trades cache (dashboard History table). Settlements only
+        # change ~4x/hour, so a short TTL keeps /api/state off the portfolio
+        # API on every 3s poll. (rows, fetched_mono).
+        self._recent_trades: tuple[list[dict], float] = ([], 0.0)
+
+    def recent_trades(self, limit: int = 15) -> list[dict]:
+        """Most-recent settled trades, shaped like Kalshi's History tab.
+        Read-only, TTL-cached. Empty in paper mode (no real settlements)."""
+        if self.paper:
+            return []
+        rows, fetched = self._recent_trades
+        if rows and time.monotonic() - fetched < RECENT_TRADES_TTL_S:
+            return rows
+        try:
+            from kalshi_bots.skills.kalshi_client import settled_trade_summary
+            setts = self.kalshi.get_recent_settlements(limit=limit)
+            rows = [settled_trade_summary(s) for s in setts]
+            self._recent_trades = (rows, time.monotonic())
+        except Exception as e:
+            log.warning("recent-trades fetch failed: %s", e)
+            return self._recent_trades[0]  # serve last good rows, never crash the view
+        return rows
 
     def _emit(self, kind: str, **data):
         for k, v in list(data.items()):
@@ -241,15 +268,23 @@ class Orchestrator:
             summary["exits"].extend(self.trader.manage_positions(now))
         except Exception as e:
             log.error("exit sweep failed: %s", e)
+        reports = []
         try:
-            for report in self.analyst.poll_pending(now):
-                if report is not None:
-                    self._emit("postmortem", event_id=report.event_id,
-                               settlement=report.settlement_status,
-                               trades=report.trades_audited,
-                               pnl_cents=report.realized_pnl_cents)
+            reports = [r for r in self.analyst.poll_pending(now) if r is not None]
+            for report in reports:
+                self._emit("postmortem", event_id=report.event_id,
+                           settlement=report.settlement_status,
+                           trades=report.trades_audited,
+                           pnl_cents=report.realized_pnl_cents)
         except Exception as e:
             log.error("settlement poll failed: %s", e)
+        try:
+            for adj in self.tuner.on_reports(reports):
+                self._emit("tuner-adjustment", param=adj.param, skill=adj.skill,
+                           old=adj.old_value, new=adj.new_value,
+                           reason=adj.reason)
+        except Exception as e:
+            log.error("tuner adjustment failed: %s", e)
         self.discord.flush()
         return summary
 

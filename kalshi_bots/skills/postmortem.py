@@ -352,7 +352,7 @@ class Postmortem:
             realized_pnl_cents=realized, settlement_status=settlement_status,
             threshold_flags=threshold_flags, note_path=note_path,
             model_direction_hits=model_hits, vol_ratio=vol_ratio,
-            constituent_drift=constituent_drift)
+            constituent_drift=constituent_drift, realized_vol=realized_vol)
         return report, outcomes_by_skill
 
     @staticmethod

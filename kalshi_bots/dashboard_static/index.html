@@ -14,8 +14,6 @@
    - COLORS block of --design-system "trading dashboard real-time
      financial data" (Dark Mode OLED)
    - style "Data-Dense Dashboard" Design System Variables
-   - style "Financial Dashboard" profit/loss colors
-   - chart "Real-Time Streaming" pulse color (dark theme)
    ============================================================ */
 :root {
   --color-primary: #0F172A;
@@ -27,11 +25,11 @@
   --color-muted: #1A1E2F;
   --color-border: #334155;
   --color-destructive: #EF4444;
-  --profit-color: #22C55E;       /* Financial Dashboard style */
+  --color-warn: #FACC15;
+  --profit-color: #22C55E;
   --loss-color: #EF4444;
-  --pulse-color: #00FF00;        /* Real-Time Streaming chart, dark theme */
-  --text-muted: #94A3B8;         /* slate-400: same slate ramp as palette */
-  --grid-gap: 8px;               /* Data-Dense Dashboard variables */
+  --text-muted: #94A3B8;
+  --grid-gap: 8px;
   --card-padding: 12px;
   --font-size-small: 12px;
   --table-row-height: 36px;
@@ -74,21 +72,15 @@ header h1 {
 .badge-halt { background: rgba(239,68,68,.15); color: var(--color-destructive); border: 1px solid rgba(239,68,68,.5); display: none; }
 .conn { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: var(--font-size-small); color: var(--text-muted); }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-destructive); }
-.conn-dot.live { background: var(--color-accent); box-shadow: 0 0 10px rgba(34,197,94,.6); } /* minimal glow per KEY EFFECTS */
+.conn-dot.live { background: var(--color-accent); box-shadow: 0 0 10px rgba(34,197,94,.6); }
 @media (prefers-reduced-motion: no-preference) {
   .conn-dot.live { animation: pulse 2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .55; } }
 }
-.icon-btn {
-  display: inline-flex; align-items: center; gap: 6px;
-  min-height: 32px; padding: 4px 10px;
-  background: var(--color-secondary); color: var(--color-foreground);
-  border: 1px solid var(--color-border); border-radius: 6px;
-  font-size: var(--font-size-small);
-  transition: background 150ms ease-out;
-}
-.icon-btn:hover { background: var(--color-muted); }
-.icon-btn svg { width: 14px; height: 14px; }
+/* data-freshness indicator: this is a source-of-truth dashboard, so how
+   stale the numbers are must be visible, not implied. */
+.freshness { font-family: var(--font-data); font-size: 11px; color: var(--text-muted); }
+.freshness.stale { color: var(--color-warn); }
 
 /* ---- 12-column dense grid (Data-Dense Dashboard) ---- */
 main {
@@ -111,7 +103,7 @@ main {
   color: var(--text-muted); margin-bottom: 8px;
 }
 
-/* ---- KPI cards row (pattern: key metrics first) ---- */
+/* ---- KPI card (bankroll) ---- */
 .kpi { grid-column: span 3; }
 .kpi .label { font-size: var(--font-size-small); color: var(--text-muted); letter-spacing: .06em; text-transform: uppercase; }
 .kpi .value {
@@ -121,36 +113,33 @@ main {
 .kpi .sub { font-family: var(--font-data); font-size: var(--font-size-small); color: var(--text-muted); }
 .pos { color: var(--profit-color); }
 .neg { color: var(--loss-color); }
-.trend { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; }
 
-/* ---- chart card (Real-Time Streaming) ---- */
-.chart-card { grid-column: span 8; }
-.chart-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-.chart-now {
-  font-family: var(--font-data); font-variant-numeric: tabular-nums;
-  font-size: 22px; font-weight: 600;
+/* ---- active window header row ---- */
+.win-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+.win-ticker { font-family: var(--font-data); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
+
+/* ---- key/value + list rows ---- */
+.kv-row { display: flex; align-items: center; gap: 8px; height: 24px; font-size: var(--font-size-small); }
+.kv-row .name { font-family: var(--font-data); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.kv-row .amt { font-family: var(--font-data); font-variant-numeric: tabular-nums; text-align: right; }
+.chip {
+  font-family: var(--font-data); font-size: 11px; font-weight: 500;
+  padding: 1px 7px; border-radius: 4px; border: 1px solid var(--color-border);
+  background: var(--color-secondary);
 }
-canvas { width: 100%; height: 180px; display: block; }
+.chip.yes { color: var(--profit-color); border-color: rgba(34,197,94,.4); }
+.chip.no  { color: var(--loss-color); border-color: rgba(239,68,68,.4); }
 
-/* ---- exposure card ---- */
-.expo-card { grid-column: span 4; }
-.bar-row { display: flex; align-items: center; gap: 8px; height: 24px; font-size: var(--font-size-small); }
-.bar-row .name { font-family: var(--font-data); width: 44%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bar-track { flex: 1; height: 6px; background: var(--color-muted); border-radius: 3px; overflow: hidden; }
-.bar-fill { height: 100%; background: var(--color-accent); border-radius: 3px; }
-.bar-row .amt { font-family: var(--font-data); font-variant-numeric: tabular-nums; width: 64px; text-align: right; }
+.empty { color: var(--text-muted); font-size: 13px; padding: 16px 4px; }
 
-/* ---- tables (sticky headers, 36px rows) ---- */
-.trades-card { grid-column: span 7; }
-.feed-card { grid-column: span 5; }
-.table-wrap { overflow: auto; max-height: 340px; }
+/* ---- recent-trades table (Kalshi History style) ---- */
+.table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 thead th {
-  position: sticky; top: 0; z-index: 10;
   background: var(--color-secondary);
   color: var(--text-muted);
-  font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
-  text-align: left; padding: 6px 8px;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  text-align: left; padding: 6px 8px; white-space: nowrap;
 }
 tbody td {
   height: var(--table-row-height);
@@ -161,36 +150,16 @@ tbody td {
 }
 tbody tr:hover { background: var(--color-muted); }
 td.num, th.num { text-align: right; }
-.chip {
-  font-family: var(--font-data); font-size: 11px; font-weight: 500;
-  padding: 1px 7px; border-radius: 4px; border: 1px solid var(--color-border);
-  background: var(--color-secondary);
-}
-.chip.yes { color: var(--profit-color); border-color: rgba(34,197,94,.4); }
-.chip.no  { color: var(--loss-color); border-color: rgba(239,68,68,.4); }
 
-/* ---- live feed (Ticker Tape secondary option) ---- */
-.feed { list-style: none; padding: 0; max-height: 340px; overflow: auto; }
-.feed li {
-  display: flex; gap: 8px; align-items: baseline;
-  min-height: var(--table-row-height); padding: 6px 4px;
-  border-top: 1px solid var(--color-muted);
-  font-size: var(--font-size-small);
-}
-.feed time { font-family: var(--font-data); color: var(--text-muted); flex: 0 0 58px; }
-.kind { flex: 0 0 auto; }
-.kind-signal      { color: #FACC15; }
-.kind-disposition { color: var(--color-accent); }
-.kind-cycle       { color: var(--text-muted); }
-.feed .detail { color: var(--color-foreground); overflow-wrap: anywhere; }
-
-.empty { color: var(--text-muted); font-size: 13px; padding: 16px 4px; }
+.win-card { grid-column: span 9; }
+.feed-card { grid-column: span 4; }
+.trades-card { grid-column: span 8; }
+.tuner-card { grid-column: span 12; }
 
 @media (max-width: 1024px) {
-  .kpi { grid-column: span 6; }
-  .chart-card, .expo-card, .trades-card, .feed-card { grid-column: span 12; }
+  .kpi { grid-column: span 12; }
+  .win-card, .feed-card, .trades-card { grid-column: span 12; }
 }
-@media (max-width: 480px) { .kpi { grid-column: span 12; } }
 </style>
 </head>
 <body>
@@ -199,140 +168,115 @@ td.num, th.num { text-align: right; }
   <span class="badge badge-env" id="env-badge">DEMO</span>
   <span class="badge badge-halt" id="halt-badge" role="status">HALTED</span>
   <div class="conn">
+    <span class="freshness" id="freshness" title="Time since the last successful state refresh">—</span>
     <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
     <span id="conn-text">connecting…</span>
-    <button class="icon-btn" id="pause-btn" aria-pressed="false" aria-label="Pause live stream">
-      <svg id="pause-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-      <span id="pause-text">Pause</span>
-    </button>
   </div>
 </header>
 
 <main>
-  <!-- KPI row: key metrics first (Real-Time/Operations pattern §2) -->
+  <!-- Bankroll: account balance (Kalshi balance API) -->
   <section class="card kpi" aria-label="Bankroll">
     <div class="label">Bankroll</div>
     <div class="value" id="kpi-bankroll">—</div>
     <div class="sub" id="kpi-env-sub">demo exchange</div>
   </section>
-  <section class="card kpi" aria-label="Daily realized profit and loss">
-    <div class="label">Daily P&amp;L</div>
-    <div class="value" id="kpi-pnl">—</div>
-    <div class="sub" id="kpi-pnl-sub">realized, ET day</div>
-  </section>
-  <section class="card kpi" aria-label="Open exposure">
-    <div class="label">Open Exposure</div>
-    <div class="value" id="kpi-expo">—</div>
-    <div class="sub" id="kpi-expo-sub">of bankroll at risk</div>
-  </section>
-  <section class="card kpi" aria-label="Open positions">
-    <div class="label">Open Positions</div>
-    <div class="value" id="kpi-pos">—</div>
-    <div class="sub">max 6 (risk cap)</div>
-  </section>
 
-  <!-- Active 15-minute window: model vs market -->
-  <section class="card" style="grid-column: span 7" aria-label="Active window">
+  <!-- Active 15-minute window: model vs market (ticker/strike/close API-verified) -->
+  <section class="card win-card" aria-label="Active window">
     <h2>Active window — model vs market</h2>
     <div id="window-none" class="empty">No resolved window (verifying against the API…)</div>
     <div id="window-box" style="display:none">
-      <div class="chart-head" style="flex-wrap:wrap">
-        <span class="chart-now" id="win-ticker" style="font-size:16px">—</span>
+      <div class="win-head">
+        <span class="win-ticker" id="win-ticker">—</span>
         <span class="chip" id="win-phase">—</span>
-        <span class="sub" id="win-countdown" style="font-family:var(--font-data)">—</span>
+        <span class="sub" id="win-countdown" style="font-family:var(--font-data);color:var(--text-muted)">—</span>
       </div>
       <div style="margin-top:6px" id="win-kv">
-        <div class="bar-row"><span class="name">Spot (composite)</span><span class="amt" id="win-spot" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Strike</span><span class="amt" id="win-strike" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Model P(up)</span><span class="amt" id="win-model" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">σ (annualized)</span><span class="amt" id="win-sigma" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Market yes bid/ask</span><span class="amt" id="win-book" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Edge yes (model − ask)</span><span class="amt" id="win-edge" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Market no bid/ask</span><span class="amt" id="win-book-no" style="width:auto">—</span></div>
-        <div class="bar-row"><span class="name">Edge no (model − ask)</span><span class="amt" id="win-edge-no" style="width:auto">—</span></div>
+        <div class="kv-row"><span class="name">Spot (composite)</span><span class="amt" id="win-spot">—</span></div>
+        <div class="kv-row"><span class="name">Strike</span><span class="amt" id="win-strike">—</span></div>
+        <div class="kv-row"><span class="name">Model P(up)</span><span class="amt" id="win-model">—</span></div>
+        <div class="kv-row"><span class="name">σ (annualized)</span><span class="amt" id="win-sigma">—</span></div>
+        <div class="kv-row"><span class="name">Market yes bid/ask</span><span class="amt" id="win-book">—</span></div>
+        <div class="kv-row"><span class="name">Edge yes (model − ask)</span><span class="amt" id="win-edge">—</span></div>
+        <div class="kv-row"><span class="name">Market no bid/ask</span><span class="amt" id="win-book-no">—</span></div>
+        <div class="kv-row"><span class="name">Edge no (model − ask)</span><span class="amt" id="win-edge-no">—</span></div>
       </div>
     </div>
   </section>
 
-  <!-- Feed health: per-constituent + Kalshi WS -->
-  <section class="card" style="grid-column: span 5" aria-label="Feed health">
+  <!-- Feed health: per-constituent composite + Kalshi WS -->
+  <section class="card feed-card" aria-label="Feed health">
     <h2>Feed health</h2>
     <div id="feed-health"><div class="empty">No feed data yet.</div></div>
-    <h2 style="margin-top:12px">Recent postmortems</h2>
-    <div id="pm-list"><div class="empty">No settled windows yet.</div></div>
   </section>
 
-  <!-- Streaming area chart: current value as large text KPI + pause control -->
-  <section class="card chart-card" aria-label="Open position profit and loss stream">
-    <h2>Open P&amp;L vs bankroll — live <span style="text-transform:none;letter-spacing:0">(last 5 min)</span></h2>
-    <div class="chart-head">
-      <span class="chart-now" id="chart-now" aria-live="off">—</span>
-      <span class="sub" id="chart-pnl-pct" style="color:var(--text-muted);font-size:12px"></span>
-      <span class="sub" id="chart-status" style="color:var(--text-muted);font-size:12px"></span>
-    </div>
-    <canvas id="pnl-chart" width="900" height="180" role="img"
-            aria-label="Streaming area chart of unrealized profit and loss on open positions, marked to the current book, over the last five minutes. Current value is shown as text above."></canvas>
-  </section>
-
-  <!-- Exposure breakdown -->
-  <section class="card expo-card">
-    <h2>Exposure by skill</h2>
-    <div id="expo-skill"><div class="empty">No open exposure.</div></div>
-    <h2 style="margin-top:12px">Exposure by event</h2>
-    <div id="expo-event"><div class="empty">No open exposure.</div></div>
-  </section>
-
-  <!-- Open trades: dense sortable-style table, sticky header -->
-  <section class="card trades-card">
-    <h2>Open trades</h2>
+  <!-- Recent trades — mirrors Kalshi's portfolio History tab -->
+  <section class="card trades-card" aria-label="Recent trades">
+    <h2>Recent trades</h2>
     <div class="table-wrap">
       <table id="trades-table">
         <thead><tr>
-          <th>Market</th><th>Side</th>
-          <th class="num">Qty</th><th class="num">Entry ¢</th><th class="num">Payout</th>
+          <th>Market</th>
+          <th>Outcome</th>
+          <th class="num">Final position</th>
+          <th class="num">Payout</th>
+          <th class="num">Total cost</th>
+          <th class="num">Total return</th>
         </tr></thead>
         <tbody id="trades-body"></tbody>
       </table>
-      <div class="empty" id="trades-empty">No open positions — watching the slate.</div>
+      <div class="empty" id="trades-empty">No settled trades yet.</div>
     </div>
   </section>
 
-  <!-- Live event feed (ticker tape) -->
-  <section class="card feed-card">
-    <h2>Live signals &amp; activity</h2>
-    <ul class="feed" id="feed" aria-live="polite" aria-relevant="additions"></ul>
-    <div class="empty" id="feed-empty">Waiting for the first cycle…</div>
+  <!-- Autonomous tuner adjustments: streak-driven risk-parameter moves,
+       filtered client-side from the generic events feed (kind: "tuner-adjustment")
+       the backend already emits — no new backend contract. -->
+  <section class="card tuner-card" aria-label="Tuner adjustments">
+    <h2>Autonomous parameter changes</h2>
+    <div class="table-wrap">
+      <table id="tuner-table">
+        <thead><tr>
+          <th>Time</th>
+          <th>Param</th>
+          <th>Skill</th>
+          <th class="num">Old</th>
+          <th class="num">New</th>
+          <th>Reason</th>
+        </tr></thead>
+        <tbody id="tuner-body"></tbody>
+      </table>
+      <div class="empty" id="tuner-empty">No autonomous adjustments yet.</div>
+    </div>
   </section>
 </main>
 
 <script>
 "use strict";
 /* Presentation layer only. Consumes the existing backend contract untouched:
-   GET /api/state  and  WS /ws (events carry series/event_id/signal_type). */
+   GET /api/state (window/feed/postmortems/exposure) + WS /ws (used purely as a
+   refresh trigger on new orchestrator events). */
 
 const $ = (id) => document.getElementById(id);
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const cents = (c) => usd.format((c || 0) / 100);
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-let paused = false;
-const chartBuf = [];              // {t, v} — buffer last 300s (chart guidance)
-const BUFFER_S = 300;
+let lastFetchOk = 0;          // epoch ms of the last successful /api/state
+let winClosesAtMs = null;     // active-window close time, for client-side countdown
 
-/* ---------- number count-up (Financial Dashboard effect) ---------- */
-function setMoney(el, centsVal, colored) {
+/* ---------- number count-up (bankroll) ---------- */
+function setMoney(el, centsVal) {
   const target = (centsVal || 0) / 100;
-  const finish = () => {
-    el.textContent = usd.format(target);
-    if (colored) el.className = "value " + (centsVal > 0 ? "pos" : centsVal < 0 ? "neg" : "");
-  };
+  const finish = () => { el.textContent = usd.format(target); };
   if (reducedMotion || el.dataset.v === undefined) { el.dataset.v = target; finish(); return; }
   const from = parseFloat(el.dataset.v) || 0;
   el.dataset.v = target;
-  const t0 = performance.now(), dur = 300;               // 150–300ms micro-interaction
+  const t0 = performance.now(), dur = 300;
   (function step(t) {
     const k = Math.min(1, (t - t0) / dur);
-    const eased = 1 - Math.pow(1 - k, 3);                 // ease-out for entering values
+    const eased = 1 - Math.pow(1 - k, 3);
     el.textContent = usd.format(from + (target - from) * eased);
     if (k < 1) requestAnimationFrame(step); else finish();
   })(t0);
@@ -345,6 +289,7 @@ async function refreshState() {
     const r = await fetch("/api/state");
     s = await r.json();
   } catch { setConn(false, "state fetch failed — retrying"); return; }
+  lastFetchOk = Date.now();
 
   $("env-badge").textContent = (s.env || "demo").toUpperCase();
   $("env-badge").classList.toggle("live", s.env === "live");
@@ -353,53 +298,13 @@ async function refreshState() {
   if (e.halted) $("halt-badge").textContent = "HALTED — " + (e.halt_reason || "");
 
   setMoney($("kpi-bankroll"), e.bankroll_cents);
-  setMoney($("kpi-pnl"), e.daily_realized_pnl_cents, true);
-  $("kpi-pnl-sub").innerHTML = trendArrow(e.daily_realized_pnl_cents) + " realized, ET day";
-  setMoney($("kpi-expo"), e.open_cost_cents);
-  const pct = e.bankroll_cents ? (100 * e.open_cost_cents / e.bankroll_cents) : 0;
-  $("kpi-expo-sub").textContent = pct.toFixed(1) + "% of bankroll at risk";
-  $("kpi-pos").textContent = e.open_positions ?? "—";
-
-  renderBars($("expo-skill"), e.by_skill || {});
-  renderBars($("expo-event"), e.by_event || {});
-  renderTrades(s.open_trades || []);
-  renderWindow(s.window);
-  renderFeedHealth(s.feed || {});
-  renderPostmortems(s.postmortems || []);
   if (s.mode) $("kpi-env-sub").textContent = s.mode;
 
-  const unrealized = s.unrealized_pnl_cents || 0;
-  $("chart-pnl-pct").textContent = (s.unrealized_pnl_pct ?? 0).toFixed(2) + "% of bankroll";
-  pushPnl(unrealized);
-  (s.events || []).forEach(seedEvent);
-}
-
-function trendArrow(v) {
-  if (!v) return "";
-  const up = v > 0;
-  return `<svg class="trend ${up ? "pos" : "neg"}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-label="${up ? "up" : "down"}">` +
-    (up ? `<path d="M7 17L17 7M17 7H9M17 7v8"/>` : `<path d="M7 7l10 10M17 17H9M17 17V9"/>`) + `</svg>`;
-}
-
-function renderBars(root, obj) {
-  const entries = Object.entries(obj).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) { root.innerHTML = '<div class="empty">No open exposure.</div>'; return; }
-  const max = entries[0][1];
-  root.innerHTML = entries.map(([k, v]) =>
-    `<div class="bar-row"><span class="name" title="${k}">${k}</span>` +
-    `<span class="bar-track"><span class="bar-fill" style="width:${(100 * v / max).toFixed(0)}%"></span></span>` +
-    `<span class="amt">${cents(v)}</span></div>`).join("");
-}
-
-function renderTrades(trades) {
-  const body = $("trades-body");
-  $("trades-empty").style.display = trades.length ? "none" : "block";
-  body.innerHTML = trades.map(t =>
-    `<tr><td title="${t.market_ticker}">${t.market_ticker}</td>` +
-    `<td><span class="chip ${t.side}">${(t.side || "").toUpperCase()}</span></td>` +
-    `<td class="num">${t.contracts}</td>` +
-    `<td class="num">${t.entry_price_cents}</td>` +
-    `<td class="num">${cents((t.contracts || 0) * 100)}</td></tr>`).join("");
+  renderWindow(s.window);
+  renderFeedHealth(s.feed || {});
+  renderTrades(s.recent_trades || []);
+  renderTuner(s.events || []);
+  updateFreshness();
 }
 
 /* ---------- active window / feed health / postmortems ---------- */
@@ -407,11 +312,11 @@ function renderWindow(w) {
   const has = !!w;
   $("window-none").style.display = has ? "none" : "block";
   $("window-box").style.display = has ? "block" : "none";
-  if (!has) return;
+  if (!has) { winClosesAtMs = null; return; }
+  winClosesAtMs = w.closes_at ? new Date(w.closes_at).getTime() : null;
   $("win-ticker").textContent = w.market_ticker || "—";
   $("win-phase").textContent = w.phase || "—";
-  const s = Math.max(0, Math.round(w.time_remaining_s || 0));
-  $("win-countdown").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} to close`;
+  tickCountdown();
   const fmt2 = {minimumFractionDigits: 2, maximumFractionDigits: 2};
   $("win-spot").textContent = w.spot != null ? w.spot.toLocaleString("en-US", fmt2) : "—";
   $("win-strike").textContent = w.strike != null ? w.strike.toLocaleString("en-US", fmt2) : "TBD";
@@ -427,131 +332,105 @@ function renderWindow(w) {
   $("win-edge-no").className = "amt " + (edgeNo > 0 ? "pos" : edgeNo < 0 ? "neg" : "");
 }
 
+/* countdown ticks client-side every second off the API-verified close time,
+   so it stays live between the 3s state polls */
+function tickCountdown() {
+  const el = $("win-countdown");
+  if (winClosesAtMs == null) { el.textContent = "—"; return; }
+  const s = Math.max(0, Math.round((winClosesAtMs - Date.now()) / 1000));
+  el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} to close`;
+}
+
 function renderFeedHealth(f) {
   const root = $("feed-health");
   const rows = (f.constituents || []).map(c => {
     const age = c.last_tick_age_s == null ? "—" : c.last_tick_age_s.toFixed(1) + "s";
-    return `<div class="bar-row"><span class="name">${c.name}</span>` +
+    return `<div class="kv-row"><span class="name">${c.name}</span>` +
       `<span class="chip ${c.healthy ? "yes" : "no"}">${c.healthy ? "OK" : "STALE"}</span>` +
       `<span class="amt">${age}</span></div>`;
   });
   const ws = f.kalshi_ws;
-  if (ws) rows.push(`<div class="bar-row"><span class="name">kalshi ws</span>` +
+  if (ws) rows.push(`<div class="kv-row"><span class="name">kalshi ws</span>` +
     `<span class="chip ${ws.healthy ? "yes" : "no"}">${ws.connected ? (ws.healthy ? "OK" : "DEGRADED") : "DOWN"}</span>` +
     `<span class="amt">${ws.seq_gap ? "seq gap" : ""}</span></div>`);
+  if (f.composite_available != null && (f.healthy_count != null)) {
+    rows.push(`<div class="kv-row" style="margin-top:6px;border-top:1px solid var(--color-muted)">` +
+      `<span class="name">composite</span>` +
+      `<span class="chip ${f.composite_available ? "yes" : "no"}">${f.composite_available ? "AVAILABLE" : "FAIL-CLOSED"}</span>` +
+      `<span class="amt">${f.healthy_count ?? "?"}/${f.constituent_count ?? "?"}</span></div>`);
+  }
   root.innerHTML = rows.length ? rows.join("") : '<div class="empty">No feed data yet.</div>';
 }
 
-function renderPostmortems(list) {
-  const root = $("pm-list");
-  if (!list.length) { root.innerHTML = '<div class="empty">No settled windows yet.</div>'; return; }
-  root.innerHTML = list.slice(-4).reverse().map(r =>
-    `<div class="bar-row"><span class="name" title="${r.event_id}">${(r.event_id || "").split("-").pop()}</span>` +
-    `<span class="chip">${r.settlement_status}</span>` +
-    `<span class="amt ${r.realized_pnl_cents > 0 ? "pos" : r.realized_pnl_cents < 0 ? "neg" : ""}">${cents(r.realized_pnl_cents)}</span></div>`).join("");
+/* Recent trades — same columns as Kalshi's portfolio History tab, sourced
+   from /portfolio/settlements (payout, final position, cost, return). */
+function fmtQty(n) {
+  const v = Math.abs(n || 0);
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+function renderTrades(list) {
+  const body = $("trades-body");
+  $("trades-empty").style.display = list.length ? "none" : "block";
+  body.innerHTML = list.map(t => {
+    const rc = t.return_cents || 0;
+    const cls = rc > 0 ? "pos" : rc < 0 ? "neg" : "";
+    const money = (rc > 0 ? "+" : "") + cents(rc);
+    const pct = `${Math.round(t.return_pct || 0)}%`;
+    const oc = (t.outcome || "").toLowerCase();
+    const side = (t.position_side || "").toLowerCase();
+    // count 0 => the position was closed before settlement (settled flat).
+    // Return is exact: matched yes/no pairs redeem 100c at netting time and
+    // the backend includes that in payout_cents.
+    const closed = t.closed_early || t.position_count === 0;
+    const posCell = closed
+      ? `<span class="chip" title="Closed before settlement (netted flat)">FLAT</span>`
+      : `${fmtQty(t.position_count)} <span class="chip ${side}">${side.toUpperCase()}</span>`;
+    return `<tr>` +
+      `<td title="${t.market_ticker}">${t.market_ticker}</td>` +
+      `<td><span class="chip ${oc}">${(t.outcome || "—").toUpperCase()}</span></td>` +
+      `<td class="num">${posCell}</td>` +
+      `<td class="num">${cents(t.payout_cents)}</td>` +
+      `<td class="num">${cents(t.total_cost_cents)}</td>` +
+      `<td class="num ${cls}">${money} (${pct})</td>` +
+      `</tr>`;
+  }).join("");
 }
 
-/* ---------- live feed ---------- */
-const seenEvents = new Set();
-function seedEvent(evt) { addFeed(evt, true); }
-function addFeed(evt, fromSeed) {
-  const key = evt.ts + "|" + evt.kind + "|" + (evt.event_id || "") + "|" + (evt.result || evt.signal_type || evt.n || "");
-  if (seenEvents.has(key)) return;
-  seenEvents.add(key);
-  $("feed-empty").style.display = "none";
-  const li = document.createElement("li");
-  const t = evt.ts ? new Date(evt.ts).toLocaleTimeString([], { hour12: false }) : "";
-  let detail = "";
-  if (evt.kind === "signal") detail = `${evt.series || ""} ${evt.event_id || ""} · ${evt.signal_type || ""}${evt.market_ticker ? " · " + evt.market_ticker : ""}`;
-  else if (evt.kind === "disposition") detail = `${evt.series || ""} ${evt.event_id || ""} · ${evt.signal_type || ""} → ${evt.result || ""}`;
-  else if (evt.kind === "cycle") detail = `cycle ${evt.n} · ${evt.signals ?? 0} signals · ${(evt.finals || []).length} finals · ${(evt.exits || []).length} exits`;
-  else detail = JSON.stringify(evt);
-  li.innerHTML = `<time datetime="${evt.ts || ""}">${t}</time>` +
-    `<span class="kind chip kind-${evt.kind}">${evt.kind}</span>` +
-    `<span class="detail"></span>`;
-  li.querySelector(".detail").textContent = detail;
-  const feed = $("feed");
-  feed.prepend(li);
-  while (feed.children.length > 100) feed.removeChild(feed.lastChild);
+/* Autonomous tuner adjustments — the backend contract is the generic events
+   list (kind, ts, + event-specific fields); this just filters/renders the
+   "tuner-adjustment" kind, newest first, capped to the most recent 20. */
+function renderTuner(events) {
+  const rows = events.filter(e => e.kind === "tuner-adjustment").slice(-20).reverse();
+  $("tuner-empty").style.display = rows.length ? "none" : "block";
+  const fmtVal = (v) => Array.isArray(v)
+    ? `(${v.map(x => (typeof x === "number" ? x.toFixed(2) : x)).join(", ")})`
+    : (typeof v === "number" ? (Number.isInteger(v) ? v : v.toFixed(3)) : String(v));
+  $("tuner-body").innerHTML = rows.map(e => {
+    const time = new Date(e.ts).toLocaleTimeString("en-US", { hour12: false });
+    const skillCell = e.skill
+      ? `<span class="chip">${e.skill}</span>`
+      : `<span style="color:var(--text-muted)">system-wide</span>`;
+    return `<tr>` +
+      `<td>${time}</td>` +
+      `<td>${e.param}</td>` +
+      `<td>${skillCell}</td>` +
+      `<td class="num">${fmtVal(e.old)}</td>` +
+      `<td class="num">${fmtVal(e.new)}</td>` +
+      `<td>${e.reason}</td>` +
+      `</tr>`;
+  }).join("");
 }
 
-/* ---------- streaming area chart (canvas; Real-Time Streaming spec) ---------- */
-function pushPnl(v) {
-  if (paused) return;                      // pause/resume required by a11y spec
-  const now = Date.now() / 1000;
-  chartBuf.push({ t: now, v });
-  while (chartBuf.length && chartBuf[0].t < now - BUFFER_S) chartBuf.shift();
-  $("chart-now").textContent = cents(v);
-  $("chart-now").className = "chart-now " + (v > 0 ? "pos" : v < 0 ? "neg" : "");
-  drawChart();
+/* ---------- freshness indicator ---------- */
+function updateFreshness() {
+  const el = $("freshness");
+  if (!lastFetchOk) { el.textContent = "—"; return; }
+  const age = Math.round((Date.now() - lastFetchOk) / 1000);
+  el.textContent = age <= 1 ? "updated just now" : `updated ${age}s ago`;
+  el.classList.toggle("stale", age > 12);   // ~4 missed 3s polls
 }
 
-function drawChart() {
-  const canvas = $("pnl-chart");
-  const ctx = canvas.getContext("2d");
-  const dpr = window.devicePixelRatio || 1;
-  const W = canvas.clientWidth, H = canvas.clientHeight || 180;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-
-  // gridlines: low-contrast so they don't compete with data (gridline-subtle)
-  ctx.strokeStyle = "#1A1E2F";
-  ctx.lineWidth = 1;
-  for (let i = 1; i < 4; i++) {
-    ctx.beginPath(); ctx.moveTo(0, (H / 4) * i); ctx.lineTo(W, (H / 4) * i); ctx.stroke();
-  }
-  if (chartBuf.length < 2) return;
-
-  const now = Date.now() / 1000;
-  const vals = chartBuf.map(p => p.v);
-  const vMax = Math.max(1, ...vals.map(Math.abs)) * 1.15;
-  const x = (t) => W - ((now - t) / BUFFER_S) * W;
-  const y = (v) => H / 2 - (v / vMax) * (H / 2 - 8);
-
-  // zero line
-  ctx.strokeStyle = "#334155";
-  ctx.setLineDash([3, 4]);
-  ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(W, y(0)); ctx.stroke();
-  ctx.setLineDash([]);
-
-  const last = chartBuf[chartBuf.length - 1];
-  const lineColor = last.v >= 0 ? "#22C55E" : "#EF4444";
-
-  // area fill (fading history per chart color guidance)
-  const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, lineColor + "44");
-  grad.addColorStop(1, lineColor + "00");
-  ctx.beginPath();
-  chartBuf.forEach((p, i) => { i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v)); });
-  ctx.lineTo(x(last.t), y(0)); ctx.lineTo(x(chartBuf[0].t), y(0)); ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
-
-  // data line: contrast vs background >= 3:1 (contrast-data)
-  ctx.beginPath();
-  chartBuf.forEach((p, i) => { i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v)); });
-  ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.stroke();
-
-  // current pulse dot (#00FF00 dark-theme pulse per chart guidance)
-  ctx.beginPath();
-  ctx.arc(x(last.t), y(last.v), 3.5, 0, Math.PI * 2);
-  ctx.fillStyle = "#00FF00";   /* --pulse-color: chart guidance, dark theme */
-  ctx.fill();
-}
-
-/* ---------- pause / resume (required control) ---------- */
-$("pause-btn").addEventListener("click", () => {
-  paused = !paused;
-  $("pause-btn").setAttribute("aria-pressed", String(paused));
-  $("pause-btn").setAttribute("aria-label", paused ? "Resume live stream" : "Pause live stream");
-  $("pause-text").textContent = paused ? "Resume" : "Pause";
-  $("pause-icon").innerHTML = paused
-    ? '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>'
-    : '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>';
-  $("chart-status").textContent = paused ? "stream paused — data still recorded server-side" : "";
-});
-
-/* ---------- WebSocket (existing /ws contract, reconnect w/ backoff) ---------- */
+/* ---------- WebSocket (existing /ws contract) — refresh trigger only ---------- */
 function setConn(live, text) {
   $("conn-dot").className = "conn-dot" + (live ? " live" : "");
   $("conn-text").textContent = text;
@@ -561,11 +440,7 @@ function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onopen = () => { wsRetry = 1000; setConn(true, "live"); };
-  ws.onmessage = (m) => {
-    if (paused) return;
-    try { addFeed(JSON.parse(m.data)); } catch {}
-    refreshState();
-  };
+  ws.onmessage = () => { refreshState(); };   // new orchestrator event -> pull fresh truth
   ws.onclose = () => {
     setConn(false, "reconnecting…");
     setTimeout(connectWS, wsRetry);
@@ -576,10 +451,9 @@ function connectWS() {
 
 refreshState();
 connectWS();
-setInterval(refreshState, 5000);
-setInterval(() => { if (!paused && !reducedMotion) { pushPnl(lastPnlValue()); } }, 2000);
-function lastPnlValue() { return chartBuf.length ? chartBuf[chartBuf.length - 1].v : 0; }
-window.addEventListener("resize", drawChart);
+setInterval(refreshState, 3000);        // state poll
+setInterval(tickCountdown, 1000);       // live countdown between polls
+setInterval(updateFreshness, 1000);     // live "updated Xs ago"
 </script>
 </body>
 </html>

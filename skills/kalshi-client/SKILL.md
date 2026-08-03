@@ -23,6 +23,8 @@ get_balance() -> int                                            # bankroll cents
 get_positions() -> list[Position]
 get_fills(market_ticker: str | None = None) -> list[Fill]
 get_settlements(market_ticker: str) -> list[Settlement]
+get_recent_settlements(limit: int = 20) -> list[Settlement]     # all markets, newest first (Kalshi History tab)
+settled_trade_summary(s: Settlement) -> dict                   # pure, module-level; Kalshi-History-tab row
 place_order(req: OrderRequest) -> OrderResult                   # raises KalshiOrderRejected, KalshiAuthError
 cancel_order(order_id: str) -> OrderResult
 ws_auth_headers(ws_path: str = "/trade-api/ws/v2") -> dict      # raises KalshiAuthError if key unset
@@ -53,7 +55,7 @@ Exceptions: `KalshiClientError` (base), `KalshiAuthError`, `KalshiNotFound`, `Ka
 11. `depth_within(snapshot, side, cents_from_best)`: sum of contracts in `side`'s ask ladder priced ≤ `best_ask + cents_from_best`. This is the number every book-depth gate consumes (e.g. the fair-value skill's minimum-depth entry check).
 
 ### Fees (ported from kalshi.js; schedule re-verified quadratic with `fee_multiplier` 1 for KXBTC15M, 2026-07-22)
-12. Entry-only fee, settlement free: `fee_dollars = 0.07 * contracts * price * (1 - price)` with price in dollars; `est_fee_cents = ceil(7 * contracts * p_cents * (100 - p_cents) / 10000)` using integer math, rounded up per order; 0 for non-positive contract counts. This is an *estimate* for sizing; **real** fees come from fills (`fee_cost`, a dollar string — verified live 2026-07-24; the fill object has NO `taker_fees_dollars`, that key lives only on the *order* object per rule 16) and positions (`fees_paid_dollars`) and are what trade notes and P&L record. `get_fills` falls back to the legacy `taker_fees_dollars` key for safety.
+12. Entry-only fee, settlement free: `fee_dollars = 0.07 * contracts * price * (1 - price)` with price in dollars; `est_fee_cents = ceil(7 * contracts * p_cents * (100 - p_cents) / 10000)` using integer math, rounded up per order; 0 for non-positive contract counts. This is an *estimate* for sizing; **real** fees come from fills (`fee_cost`, a dollar string — verified live 2026-07-24 and independently 2026-07-29; the fill object has NO `taker_fees_dollars`, that key lives only on the *order* object per rule 16) and positions (`fees_paid_dollars`) and are what trade notes and P&L record. `get_fills` falls back to the legacy `taker_fees_dollars` key for safety.
 
 ### Orders
 13. Limit orders only; market orders are forbidden at the client level for entries (trader rule, enforced here as: `action="buy"` requires `limit_price`, else `KalshiOrderRejected`). Exits may cross the spread by setting a marketable limit — still a limit order.
@@ -87,7 +89,9 @@ Exceptions: `KalshiClientError` (base), `KalshiAuthError`, `KalshiNotFound`, `Ka
 - **Ticker grammar → `yes_label`:** taken from `yes_sub_title` when present, else the ticker suffix after `event_ticker + "-"`; empty string when the ticker doesn't follow that grammar. Titles are display-only; window resolution keys on tickers (window-monitor's job).
 - **Market `status` values:** exported constant `TRADEABLE_STATUSES = {"active", "open"}` — treat those as tradeable, everything else (including unknown values) as not tradeable.
 - **Balance field migration:** prefer the integer-cents `balance` field; fall back to `balance_dollars` via `dollars_to_cents`.
-- **Fill parsing:** price read from the side-specific dollar field (`yes_price_dollars`/`no_price_dollars`, fallback `price_dollars`); fee read from `fee_cost` (dollar string, fallback legacy `taker_fees_dollars`), recorded as absolute cents.
+- **Fill parsing:** price read from the side-specific dollar field (`yes_price_dollars`/`no_price_dollars`, fallback `price_dollars`); fee read from `fee_cost` — the field real fills actually carry (verified live 2026-07-24 and 2026-07-29; `taker_fees_dollars` exists only on order objects and parsed every fill's fee as 0; kept as a legacy fallback) — recorded as absolute cents; `count_fp` is fractional on live fills (one 3-lot order came back as 2.05 + 0.95) and is rounded, never int-truncated.
+- **Fill side labeling (Kalshi semantics, verified live 2026-07-29):** the fill that closes a NO position is labeled `side: "yes"` with a yes-cents price (closing NO == buying YES). Consumers netting a fill against a position of the opposite label must flip the price (`100 − price`) into the position's own terms — risk-management's `on_exit` does this.
+- **`place_order` price units:** the v2 create-order response prices fills in yes-book terms regardless of `req.side` (the book is yes-only). `place_order` converts a NO order's `avg_fill_price` back to no-cents before returning, so `OrderResult.avg_fill_price` is **always in the terms of the side traded** — same contract as PaperBroker. Regression note: returning the raw yes-terms average as a NO entry/exit price sign-flipped every NO trade's naive pnl and stop-loss math (found 2026-07-29 reconciling vault trade notes against real fills/settlements — a session recorded as +$1.01 was really −$1.67).
 - **Clock skew:** the signature timestamp must be within Kalshi's tolerance; a skewed clock surfaces as `KalshiAuthError` with a correct key.
 
 ## Dependencies
@@ -120,4 +124,33 @@ class Fill:
 class Settlement:
     market_ticker: str; result: Literal["yes", "no", "void"]
     settled_ts: datetime | None; revenue_cents: int; raw: dict
+    event_ticker: str = ""; yes_count: float = 0.0; no_count: float = 0.0
+    fee_cents: int = 0; total_cost_cents: int = 0   # yes+no cost + fees
 ```
+
+**Settlement payload (verified live prod 2026-07-24):** a `/portfolio/settlements`
+row is `{event_ticker, ticker, market_result, yes_count_fp, no_count_fp,
+yes_total_cost_dollars, no_total_cost_dollars, fee_cost, revenue, value,
+settled_time}`. `revenue` is an **integer already in cents** (net directional
+payout = `|yes_count - no_count| * 100` when the net side wins, else 0) — NOT a
+`_dollars` string. The old parser read a non-existent `revenue_dollars` and so
+returned `revenue_cents=0` every time; reconcile never depended on it (it books
+from recorded cost basis and only reads `.result`), but `get_recent_settlements`
+does. `settled_trade_summary` mirrors Kalshi's History columns from the settlement
+payload alone: **final position = net of the two sides** (buying the opposite
+side is how you close on Kalshi, so gross `yes_count`/`no_count` over-counts;
+net 0 => closed before settlement, `closed_early=True`), **payout =
+min(yes,no) matched pairs × 100c + `revenue`** (each netted pair redeems for
+$1 at netting time; the surviving net position pays `revenue` at settlement),
+**total cost = yes+no trade cost + fees**, **return = payout − total cost**.
+Exact for hold-to-settlement trades (validated against a live row: 5 NO, $5
+payout, $3.39 cost, +$1.61/48%) and for buy-only closed positions (validated
+2026-07-30: reproduces the 2026-07-29 session's true fill-by-fill cash flow
+to the cent on all three windows — the prior formula ignored pair
+redemptions and showed every closed trade as a −100% loss on the dashboard).
+Known limitation: a position reduced by a *direct same-side sell* books its
+proceeds outside the settlement payload, so such hand-traded rows read low —
+the bot never does this (its exits are opposite-side buys via the v2 bid/ask
+mapping). The fills feed can't correct it either: it AGES OUT within hours
+(a fills cash-flow reconstruction was tried and abandoned — +11771% on older
+rows). The settlement payload is authoritative and permanent.

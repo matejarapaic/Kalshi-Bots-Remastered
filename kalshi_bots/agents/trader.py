@@ -20,18 +20,20 @@ from kalshi_bots.skills.fair_value_model import (
     evaluate, moneyness_sigmas, side_edges,
 )
 from kalshi_bots.skills.kalshi_client import depth_within
+# read via current() at decision time, not frozen at import — the tuner may
+# adjust these live (skills/risk-management/SKILL.md, "Live overrides").
+# ATM_MIN_SIGMA_DISTANCE is not tunable, so it imports directly;
+# required_edge_cents reads current("MIN_EDGE_CENTS") internally.
 from kalshi_bots.skills.risk_management import (
-    ATM_MIN_SIGMA_DISTANCE, DEPTH_COLLAPSE_FRACTION, ENTRY_PHASES,
-    EXIT_EDGE_CENTS, MIN_DEPTH_WITHIN_5C, SIGMA_PLAUSIBLE_MAX,
-    SIGMA_PLAUSIBLE_MIN, STOP_LOSS_PCT, required_edge_cents,
+    ATM_MIN_SIGMA_DISTANCE, ENTRY_PHASES, current, required_edge_cents,
 )
 from kalshi_bots.skills.skill_matcher import SkillMatcher
 from kalshi_bots.skills.window_monitor import (
     WINDOW_S, parse_market_ticker, window_phase,
 )
 from kalshi_bots.types import (
-    CryptoSignal, OrderbookSnapshot, OrderRequest, Settlement, SizingRequest,
-    TradeCard, VaultQuery, WindowRef,
+    CryptoSignal, Fill, OrderbookSnapshot, OrderRequest, Settlement,
+    SizingRequest, TradeCard, VaultQuery, WindowRef,
 )
 
 log = logging.getLogger(__name__)
@@ -86,7 +88,13 @@ class Trader:
                 cost = contracts * fm.get("entry_price_cents", 0) + fm.get("fee_cents", 0)
                 won = s.result == fm.get("side")
                 pnl = (contracts * 100 - cost) if won else -cost
-                self._close_trade_note(note.path, "settled_while_down", None, pnl)
+                self._close_trade_note(note.path, "settled_while_down", None, pnl, extra={
+                    "settlement_raw": s.raw,
+                    "settlement_revenue_cents": s.revenue_cents,
+                    "settlement_yes_count": s.yes_count,
+                    "settlement_no_count": s.no_count,
+                    "settlement_total_cost_cents": s.total_cost_cents,
+                })
                 closed += 1
                 continue
             try:
@@ -224,9 +232,18 @@ class Trader:
 
         fills = [f for f in self.broker.get_fills(market.market_ticker)
                  if f.order_id == order.order_id]
-        fill = fills[-1] if fills else None
-        if fill:
-            self.risk.on_fill(fill, market, best.skill_name, window.event_ticker)
+        # Ledger updates come from the order result, not the fills feed: the
+        # feed indexes asynchronously and often has nothing this soon after
+        # placement, which silently skipped on_fill and left the exposure
+        # ledger blind to live positions (found 2026-07-29). The result also
+        # totals partial fills the feed reports as separate records.
+        self.risk.on_fill(Fill(
+            order_id=order.order_id, market_ticker=market.market_ticker,
+            side=side, action="buy", contracts=order.filled_contracts,
+            price=order.avg_fill_price or price,
+            taker_fee_cents=order.fee_cents,
+            ts=datetime.now(timezone.utc), raw=order.raw),
+            market, best.skill_name, window.event_ticker)
         fill_price = order.avg_fill_price or price
         edge_cents = model_prob * 100 - fill_price
         partial = " (partial)" if order.filled_contracts < sizing.contracts else ""
@@ -239,7 +256,7 @@ class Trader:
             level="info")
         self._write_trade_note(coid, best.skill_name, market, side, order,
                                price, model_prob, conditions, signal, window,
-                               sigma=sigma, spot=spot.mid)
+                               sigma=sigma, spot=spot.mid, fills=fills)
         self.open_trades[coid] = {
             "market_ticker": market.market_ticker, "skill": best.skill_name,
             "side": side, "contracts": order.filled_contracts,
@@ -267,18 +284,23 @@ class Trader:
             # fee-aware edge floor: the modeled edge must clear round-trip
             # taker fees + slippage, not merely the flat MIN_EDGE_CENTS. Fees
             # peak at the money, exactly where thin edges are least reliable.
-            min_edge = required_edge_cents(price) if price is not None else MIN_EDGE_CENTS
+            # required_edge_cents reads current("MIN_EDGE_CENTS"), so the
+            # tuner's live edge adjustments still apply.
+            min_edge = (required_edge_cents(price) if price is not None
+                        else current("MIN_EDGE_CENTS"))
             c["edge_ge_min"] = edge is not None and edge >= min_edge
             # at-the-money guard: refuse coin-flips where a few dollars of spot
             # noise flips the model's answer (2026-07-24 postmortem: the losers
             # clustered here). moneyness in settlement-distribution stddevs.
             c["not_at_the_money"] = moneyness_sigmas(est) >= ATM_MIN_SIGMA_DISTANCE
             c["phase_allowed"] = window_phase(now, window) in ENTRY_PHASES
+            min_depth = current("MIN_DEPTH_WITHIN_5C")
             c["depth_both_sides"] = (
-                depth_within(snapshot, "yes", 5) >= MIN_DEPTH_WITHIN_5C
-                and depth_within(snapshot, "no", 5) >= MIN_DEPTH_WITHIN_5C)
+                depth_within(snapshot, "yes", 5) >= min_depth
+                and depth_within(snapshot, "no", 5) >= min_depth)
             c["spot_healthy"] = spot.constituents_healthy >= 2
-            c["sigma_plausible"] = SIGMA_PLAUSIBLE_MIN <= sigma <= SIGMA_PLAUSIBLE_MAX
+            c["sigma_plausible"] = (current("SIGMA_PLAUSIBLE_MIN") <= sigma
+                                    <= current("SIGMA_PLAUSIBLE_MAX"))
             c["ask_available"] = price is not None
             model_prob = (est.model_prob_up if side == "yes"
                           else est.model_prob_down)
@@ -321,15 +343,29 @@ class Trader:
             if order.filled_contracts > 0:
                 fills = [f for f in self.broker.get_fills(market.market_ticker)
                          if f.order_id == order.order_id]
-                pnl = None
-                if fills:
-                    pnl = self.risk.on_exit(fills[-1], market, t["skill"])
+                # same rationale as the entry path: the fills feed lags order
+                # placement, so the ledger exit is booked from the order
+                # result (side-consistent price, fee included)
+                pnl = self.risk.on_exit(Fill(
+                    order_id=order.order_id,
+                    market_ticker=market.market_ticker,
+                    side=t["side"], action="sell",
+                    contracts=order.filled_contracts,
+                    price=order.avg_fill_price,
+                    taker_fee_cents=order.fee_cents,
+                    ts=datetime.now(timezone.utc), raw=order.raw),
+                    market, t["skill"])
                 if pnl is None:
                     # no ledger position to draw fee-inclusive basis from
                     # (e.g. a restored trade the ledger never saw) — fall back
                     # to the fee-blind estimate rather than losing the note.
                     pnl = (order.avg_fill_price - t["entry_price"]) * order.filled_contracts
-                self._close_trade_note(t["note"], reason, order.avg_fill_price, pnl)
+                self._close_trade_note(t["note"], reason, order.avg_fill_price, pnl, extra={
+                    "exit_order_id": order.order_id, "exit_status": order.status,
+                    "exit_fill_ts": fills[-1].ts.isoformat() if fills else None,
+                    "exit_order_raw": order.raw,
+                    "exit_fills_raw": [f.raw for f in fills],
+                })
                 result_icon = "🟢" if pnl >= 0 else "🔴"
                 self.discord.notify(
                     f"{result_icon} **EXIT** — {t['skill']} ({reason})\n"
@@ -356,7 +392,7 @@ class Trader:
             bid = snapshot.yes_bid if t["side"] == "yes" else snapshot.no_bid
             if bid is not None and t["entry_price"] > 0:
                 loss_pct = 100 * (t["entry_price"] - bid) / t["entry_price"]
-                if loss_pct >= STOP_LOSS_PCT:
+                if loss_pct >= current("STOP_LOSS_PCT"):
                     return "stop_loss"
 
         if t.get("skill") != "btc-15min-fair-value" or window is None \
@@ -374,14 +410,15 @@ class Trader:
             return None  # nothing to exit into anyway; retry next tick
         yes_d = depth_within(snapshot, "yes", 5)
         no_d = depth_within(snapshot, "no", 5)
-        if min(yes_d, no_d) < MIN_DEPTH_WITHIN_5C * DEPTH_COLLAPSE_FRACTION:
+        if min(yes_d, no_d) < (current("MIN_DEPTH_WITHIN_5C")
+                               * current("DEPTH_COLLAPSE_FRACTION")):
             return "depth_collapse"
         est = evaluate(window, spot, snapshot, sigma, now=now)
         edges = side_edges(est, snapshot)
         held, other = t["side"], ("no" if t["side"] == "yes" else "yes")
         if edges[other] is not None and edges[other] > 0:
             return "edge_inverted"   # model now on the market's other side
-        if edges[held] is not None and edges[held] <= EXIT_EDGE_CENTS:
+        if edges[held] is not None and edges[held] <= current("EXIT_EDGE_CENTS"):
             return "edge_converged"  # thesis played out
         return None
 
@@ -393,8 +430,10 @@ class Trader:
 
     def _write_trade_note(self, coid, skill, market, side, order, signal_price,
                           model_prob, conditions, signal, window: WindowRef,
-                          sigma: float | None = None, spot: float | None = None):
+                          sigma: float | None = None, spot: float | None = None,
+                          fills: list[Fill] | None = None):
         path = self._note_path(coid)
+        fills = fills or []
         fm = {
             "client_order_id": coid,
             "event_id": window.event_ticker,
@@ -414,17 +453,29 @@ class Trader:
             "exit_deviation": False,
             "env": self.env,
             "opened_at": datetime.now(timezone.utc).isoformat(),
+            # Kalshi-sourced, verbatim — the fills feed ages out within
+            # hours (kalshi_client.settled_trade_summary docstring), so this
+            # note is the only durable copy past that window.
+            "kalshi_order_id": order.order_id,
+            "order_status": order.status,
+            "fill_ts": fills[-1].ts.isoformat() if fills else None,
+            "entry_order_raw": order.raw,
+            "entry_fills_raw": [f.raw for f in fills],
         }
         body = (f"# Trade {coid}\n\n{skill} {side} {order.filled_contracts}x "
                 f"{market.market_ticker} @ {order.avg_fill_price}c "
                 f"(signal price {signal_price}c)\n")
         self.vault.write_note(path, fm, body, caller="trader")
 
-    def _close_trade_note(self, path, reason, exit_price, pnl):
+    def _close_trade_note(self, path, reason, exit_price, pnl,
+                          extra: dict | None = None):
         try:
-            self.vault.update_frontmatter(path, {
+            fm = {
                 "status": "closed", "exit_reason": reason,
                 "exit_price_cents": exit_price, "realized_pnl_cents": pnl,
-            }, caller="trader")
+            }
+            if extra:
+                fm.update(extra)
+            self.vault.update_frontmatter(path, fm, caller="trader")
         except Exception as e:
             log.error("failed to close trade note %s: %s", path, e)

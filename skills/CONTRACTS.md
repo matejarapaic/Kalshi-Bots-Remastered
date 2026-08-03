@@ -237,8 +237,14 @@ class Settlement:
     market_ticker: str
     result: Literal["yes", "no", "void"]
     settled_ts: datetime | None
-    revenue_cents: int
+    revenue_cents: int          # API `revenue` int field (already cents)
     raw: dict
+    # enriched to mirror Kalshi's History tab (defaults => back-compatible):
+    event_ticker: str = ""
+    yes_count: float = 0.0      # gross yes_count_fp
+    no_count: float = 0.0       # gross no_count_fp
+    fee_cents: int = 0          # fee_cost
+    total_cost_cents: int = 0   # yes+no trade cost + fees == Kalshi "Total cost"
 
 @dataclass
 class VaultNote:
@@ -285,6 +291,24 @@ class PostmortemReport:
     settlement_status: Literal["settled", "pending", "voided", "mismatch"]
     threshold_flags: list[str]
     note_path: str
+    # crypto counterfactual dimensions (sprint-4); aggregated by the analyst
+    model_direction_hits: int = 0    # trades whose model side matched settlement
+    vol_ratio: float | None = None   # window realized vol / mean sigma_used
+    constituent_drift: bool = False  # feed constituent degraded in-window
+    realized_vol: float | None = None  # window's own annualized realized vol
+                                       # (tuner sigma-floor policy, 2026-08-02)
+
+@dataclass
+class ParamAdjustment:
+    # one live risk-parameter change decided by the tuner; skill is None for
+    # system-wide parameters. Values mirror what risk-management's override
+    # layer actually applied (tuples for SKILL_RISK_MULTIPLIER).
+    param: str
+    skill: str | None
+    old_value: object
+    new_value: object
+    reason: str
+    ts: datetime
 ```
 
 ## Cross-cutting rules restated (specs must not contradict these)

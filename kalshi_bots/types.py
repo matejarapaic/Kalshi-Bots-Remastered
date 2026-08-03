@@ -258,8 +258,16 @@ class Settlement:
     market_ticker: str
     result: Literal["yes", "no", "void"]
     settled_ts: datetime | None
-    revenue_cents: int
+    revenue_cents: int          # net directional settlement payout, from the
+                                # API `revenue` int field (already cents)
     raw: dict
+    # Enriched from the settlement payload to mirror Kalshi's History tab
+    # (crypto pivot; defaults keep older per-ticker callers unaffected):
+    event_ticker: str = ""
+    yes_count: float = 0.0      # gross yes_count_fp
+    no_count: float = 0.0       # gross no_count_fp
+    fee_cents: int = 0          # fee_cost
+    total_cost_cents: int = 0   # yes+no trade cost + fees == Kalshi "Total cost"
 
 
 # --- vault types ---
@@ -322,3 +330,20 @@ class PostmortemReport:
     vol_ratio: float | None = None   # window realized vol / mean sigma_used
     constituent_drift: bool = False  # a feed constituent degraded in-window
                                      # -> exclude window from aggregate learning
+    realized_vol: float | None = None  # window's own annualized realized vol
+                                       # (tuner sigma-floor policy, 2026-08-02)
+
+
+# --- tuner types ---
+
+@dataclass
+class ParamAdjustment:
+    """One live risk-parameter change decided by the tuner. `skill` is None
+    for system-wide parameters; values mirror what risk-management's
+    override layer applied (tuples for SKILL_RISK_MULTIPLIER)."""
+    param: str
+    skill: str | None
+    old_value: object
+    new_value: object
+    reason: str
+    ts: datetime

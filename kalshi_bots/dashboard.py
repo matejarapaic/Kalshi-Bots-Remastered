@@ -123,6 +123,8 @@ def create_app(orchestrator):
         analyst = getattr(orchestrator, "analyst", None)
         recent = list(getattr(analyst, "recent_reports", []) or [])[-4:]
         run_mode = getattr(orchestrator, "mode", "demo")  # "demo" | "live" — live_trading_guard's actual result
+        recent_trades_fn = getattr(orchestrator, "recent_trades", None)
+        recent_trades = recent_trades_fn() if callable(recent_trades_fn) else []
         return {
             "env": run_mode,
             "mode": ("paper" if getattr(orchestrator, "paper", True)
@@ -134,6 +136,7 @@ def create_app(orchestrator):
             "unrealized_pnl_pct": (100 * unrealized_cents / bankroll) if bankroll else 0.0,
             "open_trades": trades,
             "postmortems": [dataclasses.asdict(r) for r in recent],
+            "recent_trades": recent_trades,
             "events": orchestrator.events[-100:],
         }
 
@@ -152,8 +155,13 @@ def create_app(orchestrator):
         else:
             w = getattr(getattr(orchestrator, "monitor", None),
                         "current_window", None)
+            # per-ticker health (snapshot present, no seq gap, fresh update),
+            # not just .connected — the same signal the widget shows and the
+            # trader gates on. Expect brief "degraded" blips at window
+            # rollover until the new ticker's first snapshot arrives; the
+            # docstring's "degraded is not down" covers exactly that.
             checks["kalshi_ws"] = bool(
-                book.health(w.market_ticker if w else "").connected)
+                book.health(w.market_ticker if w else "").healthy)
         checks["window_resolved"] = getattr(
             getattr(orchestrator, "monitor", None), "current_window", None) is not None
         halted, halt_reason = orchestrator.risk.halted()
