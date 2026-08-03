@@ -291,6 +291,12 @@ class PostmortemReport:
     settlement_status: Literal["settled", "pending", "voided", "mismatch"]
     threshold_flags: list[str]
     note_path: str
+    # crypto counterfactual dimensions (sprint-4); aggregated by the analyst
+    model_direction_hits: int = 0    # trades whose model side matched settlement
+    vol_ratio: float | None = None   # window realized vol / mean sigma_used
+    constituent_drift: bool = False  # feed constituent degraded in-window
+    realized_vol: float | None = None  # window's own annualized realized vol
+                                       # (tuner sigma-floor policy, 2026-08-02)
 
 @dataclass
 class ParamAdjustment:

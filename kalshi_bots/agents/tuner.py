@@ -54,6 +54,8 @@ class Tuner:
         self.state.loss_streak = int(fm.get("loss_streak") or 0)
         self.state.no_trade_streak = int(fm.get("no_trade_streak") or 0)
         self.state.windows_seen = int(fm.get("windows_seen") or 0)
+        for v in (fm.get("recent_sigmas") or []):
+            self.state.recent_sigmas.append(float(v))
         for key, value in (fm.get("active_overrides") or {}).items():
             name, _, skill = key.partition("|")
             if isinstance(value, list):
@@ -97,6 +99,7 @@ class Tuner:
             "loss_streak": self.state.loss_streak,
             "no_trade_streak": self.state.no_trade_streak,
             "windows_seen": self.state.windows_seen,
+            "recent_sigmas": [round(s, 4) for s in self.state.recent_sigmas],
             "active_overrides": rm.active_overrides(),
             "env": self.env,
             "updated": datetime.now(timezone.utc).isoformat(),

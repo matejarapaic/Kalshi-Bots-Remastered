@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from kalshi_bots.skills import risk_management as rm
@@ -32,6 +33,19 @@ NO_TRADE_STREAK_TRIGGER = 3  # consecutive settled tradeless windows (~45m) -> r
 TIGHTEN_STEP = 0.85          # multiplicative step for lower-is-tighter params
 EDGE_STEP_CENTS = 1          # additive step for MIN_EDGE_CENTS (raise-is-tighter)
 
+# Sigma-floor policy (CONFIRMED 2026-08-02, owner-directed): SIGMA_PLAUSIBLE_MIN
+# is deliberately NOT in POLICY_PARAMS — the streak relax/tighten loops never
+# touch it. It moves through exactly one mechanism: after
+# SIGMA_LOSS_STREAK_TRIGGER consecutive losing windows, the floor is raised
+# to the session's average realized vol (mean over the last
+# SIGMA_SESSION_WINDOWS settled windows that had a vol reading) if that
+# average is above the current floor. Raise-only: the tuner never lowers the
+# sigma floor — wins and no-trade streaks leave it where it is, and only an
+# owner edit/override-clear brings it back down. Corridor-clamped like
+# everything else (tighten side of TUNABLE_BOUNDS caps it at 2x baseline).
+SIGMA_LOSS_STREAK_TRIGGER = 2   # consecutive losing windows -> sigma tighten
+SIGMA_SESSION_WINDOWS = 20      # session-average lookback, bounded deque (~5h)
+
 # The streak policy moves this set — the highest-leverage sizing/entry/exposure
 # dials. Relaxing walks the same set back. (None = system-wide, "per-skill" =
 # one override per skill in the risk table.)
@@ -49,10 +63,15 @@ POLICY_PARAMS: tuple[tuple[str, bool], ...] = (
 @dataclass
 class TunerState:
     """Window-level streak counters (PostmortemReport carries no per-skill
-    split; with one confirmed skill trading, window == skill in practice)."""
+    split; with one confirmed skill trading, window == skill in practice).
+    `recent_sigmas` is the sigma-floor policy's session memory: realized vol
+    of the last SIGMA_SESSION_WINDOWS settled windows (bounded deque — 24/7
+    hygiene)."""
     loss_streak: int = 0
     no_trade_streak: int = 0
     windows_seen: int = 0
+    recent_sigmas: deque = field(
+        default_factory=lambda: deque(maxlen=SIGMA_SESSION_WINDOWS))
 
 
 def record_window(state: TunerState, report: PostmortemReport) -> str:
@@ -69,6 +88,8 @@ def record_window(state: TunerState, report: PostmortemReport) -> str:
     if report.settlement_status != "settled":
         return "skipped"
     state.windows_seen += 1
+    if report.realized_vol is not None:
+        state.recent_sigmas.append(report.realized_vol)
     if report.trades_audited == 0:
         state.no_trade_streak += 1
         return "no_trade"
@@ -178,6 +199,33 @@ def relax_all(reason: str) -> list[ParamAdjustment]:
     return out
 
 
+def tighten_sigma_floor(state: TunerState, reason: str) -> list[ParamAdjustment]:
+    """Raise SIGMA_PLAUSIBLE_MIN to the session's average realized vol
+    (raise-only; corridor-clamped by set_override). No-op when the session
+    average is at/below the current floor (the gate is already tighter than
+    the session's typical regime) or when no vol readings exist yet. This is
+    the ONLY tuner path that moves the sigma floor — it is not a policy
+    param, and nothing here ever lowers it."""
+    if not state.recent_sigmas:
+        return []
+    session_avg = sum(state.recent_sigmas) / len(state.recent_sigmas)
+    cur = rm.current("SIGMA_PLAUSIBLE_MIN")
+    base = rm.baseline("SIGMA_PLAUSIBLE_MIN")
+    ceiling = rm.TUNABLE_BOUNDS["SIGMA_PLAUSIBLE_MIN"][1] * base
+    new = min(session_avg, ceiling)
+    if new <= cur:
+        return []
+    try:
+        old, new = rm.set_override("SIGMA_PLAUSIBLE_MIN", new,
+                                   reason=reason, caller="tuner")
+    except rm.RiskError as e:
+        log.warning("tuner sigma-floor tighten rejected: %s", e)
+        return []
+    return [ParamAdjustment(param="SIGMA_PLAUSIBLE_MIN", skill=None,
+                            old_value=old, new_value=new, reason=reason,
+                            ts=datetime.now(timezone.utc))]
+
+
 def apply_feedback(state: TunerState,
                    report: PostmortemReport) -> list[ParamAdjustment]:
     """Record one settled window and apply whatever the streak policy calls
@@ -185,16 +233,25 @@ def apply_feedback(state: TunerState,
     streak; a win relaxes one step; a no-trade streak relaxes one step at
     every NO_TRADE_STREAK_TRIGGER-multiple (it can only undo prior
     tightening — the baseline is the ceiling, so a no-trade streak with no
-    active overrides is a no-op)."""
+    active overrides is a no-op). Separately, once the loss streak reaches
+    SIGMA_LOSS_STREAK_TRIGGER, every further loss also re-checks the sigma
+    floor against the session-average vol (raise-only; usually a no-op after
+    the first raise)."""
     outcome = record_window(state, report)
+    out: list[ParamAdjustment] = []
+    if outcome == "loss" and state.loss_streak >= SIGMA_LOSS_STREAK_TRIGGER:
+        out.extend(tighten_sigma_floor(
+            state, f"{state.loss_streak} consecutive losing windows — "
+                   f"sigma floor raised to session average vol"))
     if outcome == "loss" and state.loss_streak >= LOSS_STREAK_TRIGGER \
             and state.loss_streak % LOSS_STREAK_TRIGGER == 0:
-        return tighten_all(
-            f"{state.loss_streak} consecutive losing windows")
+        out.extend(tighten_all(
+            f"{state.loss_streak} consecutive losing windows"))
+        return out
     if outcome == "win":
         return relax_all("winning window")
     if outcome == "no_trade" and state.no_trade_streak >= NO_TRADE_STREAK_TRIGGER \
             and state.no_trade_streak % NO_TRADE_STREAK_TRIGGER == 0:
         return relax_all(
             f"{state.no_trade_streak} consecutive windows without a trade")
-    return []
+    return out

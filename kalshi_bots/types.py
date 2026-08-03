@@ -330,6 +330,8 @@ class PostmortemReport:
     vol_ratio: float | None = None   # window realized vol / mean sigma_used
     constituent_drift: bool = False  # a feed constituent degraded in-window
                                      # -> exclude window from aggregate learning
+    realized_vol: float | None = None  # window's own annualized realized vol
+                                       # (tuner sigma-floor policy, 2026-08-02)
 
 
 # --- tuner types ---

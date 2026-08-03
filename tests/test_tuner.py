@@ -4,8 +4,9 @@ from kalshi_bots.agents.tuner import Tuner, STATE_PATH
 from kalshi_bots.skills import risk_management as rm
 from kalshi_bots.skills import tuner as tuner_skill
 from kalshi_bots.skills.tuner import (
-    LOSS_STREAK_TRIGGER, NO_TRADE_STREAK_TRIGGER, TunerState,
-    apply_feedback, record_window, relax_all, tighten_all,
+    LOSS_STREAK_TRIGGER, NO_TRADE_STREAK_TRIGGER, SIGMA_LOSS_STREAK_TRIGGER,
+    SIGMA_SESSION_WINDOWS, TunerState, apply_feedback, record_window,
+    relax_all, tighten_all, tighten_sigma_floor,
 )
 from kalshi_bots.skills.vault import Vault
 from kalshi_bots.types import PostmortemReport
@@ -13,13 +14,13 @@ from kalshi_bots.types import PostmortemReport
 FV = "btc-15min-fair-value"
 
 
-def report(status="settled", trades=1, pnl=-100, drift=False):
+def report(status="settled", trades=1, pnl=-100, drift=False, vol=None):
     return PostmortemReport(
         family="KXBTC15M", event_id="E", trades_audited=trades,
         entry_violations=0, exit_deviations=0, declined_candidates=0,
         counterfactual_pnl_cents=0, realized_pnl_cents=pnl,
         settlement_status=status, threshold_flags=[], note_path="p",
-        constituent_drift=drift)
+        constituent_drift=drift, realized_vol=vol)
 
 
 class TestStreakCounting:
@@ -154,6 +155,82 @@ class TestRelax:
         assert rm.current("MIN_EDGE_CENTS") < rm.MIN_EDGE_CENTS
 
 
+class TestSigmaFloor:
+    """Owner-directed 2026-08-02: SIGMA_PLAUSIBLE_MIN moves only through
+    tighten_sigma_floor — 2 consecutive losses raise it to the session's
+    average realized vol, raise-only, corridor-capped. Never relaxed."""
+
+    def test_fires_at_two_losses_not_one(self):
+        s = TunerState()
+        # session average (0.25) above the 0.18 baseline so a raise is due
+        assert apply_feedback(s, report(pnl=-1, vol=0.25)) == []
+        assert not rm.has_override("SIGMA_PLAUSIBLE_MIN")
+        adjustments = apply_feedback(s, report(pnl=-1, vol=0.25))
+        assert [a.param for a in adjustments] == ["SIGMA_PLAUSIBLE_MIN"]
+        assert rm.current("SIGMA_PLAUSIBLE_MIN") == pytest.approx(0.25)
+
+    def test_raises_to_session_average(self):
+        s = TunerState()
+        apply_feedback(s, report(trades=0, vol=0.30))   # no-trade, still in avg
+        apply_feedback(s, report(pnl=-1, vol=0.20))
+        apply_feedback(s, report(pnl=-1, vol=0.25))
+        assert rm.current("SIGMA_PLAUSIBLE_MIN") == pytest.approx(0.25)  # mean
+
+    def test_raise_only_noop_when_average_below_floor(self):
+        s = TunerState()
+        apply_feedback(s, report(pnl=-1, vol=0.10))
+        adjustments = apply_feedback(s, report(pnl=-1, vol=0.12))
+        assert adjustments == []                        # avg 0.11 < floor 0.18
+        assert not rm.has_override("SIGMA_PLAUSIBLE_MIN")
+
+    def test_corridor_caps_at_double_baseline(self):
+        s = TunerState()
+        apply_feedback(s, report(pnl=-1, vol=1.5))
+        apply_feedback(s, report(pnl=-1, vol=1.5))
+        assert rm.current("SIGMA_PLAUSIBLE_MIN") == pytest.approx(
+            2.0 * rm.SIGMA_PLAUSIBLE_MIN)               # not 1.5
+
+    def test_relax_never_touches_sigma_floor(self):
+        s = TunerState()
+        apply_feedback(s, report(pnl=-1, vol=0.25))
+        apply_feedback(s, report(pnl=-1, vol=0.25))
+        raised = rm.current("SIGMA_PLAUSIBLE_MIN")
+        assert raised > rm.SIGMA_PLAUSIBLE_MIN
+        for _ in range(5):
+            apply_feedback(s, report(pnl=50, vol=0.25))    # wins relax policy params
+        for _ in range(2 * NO_TRADE_STREAK_TRIGGER):
+            apply_feedback(s, report(trades=0, vol=0.25))  # no-trade relax too
+        assert rm.current("SIGMA_PLAUSIBLE_MIN") == raised  # untouched
+
+    def test_windows_without_vol_reading_do_not_poison_average(self):
+        s = TunerState()
+        apply_feedback(s, report(pnl=-1, vol=None))
+        apply_feedback(s, report(pnl=-1, vol=0.25))
+        # only the 0.25 reading counts; None contributed nothing
+        assert rm.current("SIGMA_PLAUSIBLE_MIN") == pytest.approx(0.25)
+
+    def test_no_vol_readings_at_all_is_a_noop(self):
+        s = TunerState()
+        assert tighten_sigma_floor(s, "test") == []
+        apply_feedback(s, report(pnl=-1))
+        assert apply_feedback(s, report(pnl=-1)) == []
+
+    def test_session_lookback_is_bounded(self):
+        s = TunerState()
+        for _ in range(SIGMA_SESSION_WINDOWS + 10):
+            record_window(s, report(pnl=50, vol=0.2))
+        assert len(s.recent_sigmas) == SIGMA_SESSION_WINDOWS
+
+    def test_third_loss_fires_both_sigma_and_policy_tighten(self):
+        s = TunerState()
+        apply_feedback(s, report(pnl=-1, vol=0.25))
+        apply_feedback(s, report(pnl=-1, vol=0.25))      # sigma raise at 2
+        adjustments = apply_feedback(s, report(pnl=-1, vol=0.25))  # streak 3
+        params = {a.param for a in adjustments}
+        assert "MIN_EDGE_CENTS" in params                # policy tighten fired
+        assert "SIGMA_PLAUSIBLE_MIN" not in params       # already at avg, no-op
+
+
 class FakeDiscord:
     def __init__(self):
         self.messages: list[tuple[str, str]] = []
@@ -208,6 +285,14 @@ class TestAgent:
         fresh.reload()
         assert not rm.has_override("MIN_EDGE_CENTS")
         assert rm.current("MIN_EDGE_CENTS") == 2
+
+    def test_recent_sigmas_round_trip_through_restart(self, vault):
+        tuner = Tuner(vault, env="demo")
+        tuner.on_reports([report(pnl=50, vol=0.21), report(pnl=50, vol=0.23)])
+        rm.clear_all_overrides()
+        fresh = Tuner(vault, env="demo")
+        fresh.reload()
+        assert list(fresh.state.recent_sigmas) == [0.21, 0.23]
 
     def test_win_relax_notifies_at_info_level(self, vault):
         discord = FakeDiscord()
