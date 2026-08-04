@@ -1,0 +1,24 @@
+---
+family: KXBTC15M
+env: demo
+date: '2026-08-03'
+windows: 2
+trades: 0
+realized_pnl_cents: 0
+counterfactual_pnl_cents: 0
+settled_events:
+- KXBTC15M-26AUG031930
+- KXBTC15M-26AUG031945
+---
+# Postmortems KXBTC15M
+
+## KXBTC15M-26AUG031930 — yes
+Watched, nothing flagged — divergence never reached the entry threshold. A spot-feed constituent degraded mid-window; this window is excluded from aggregate learning.
+constituent drift in window — excluded from aggregate learning
+strike=63482.99 expiration=63521.37 realized_vol=None trades=0 pnl=0c declined=0 cf=0c
+_watched, nothing traded — that is data_
+
+## KXBTC15M-26AUG031945 — pending
+Watched, nothing flagged — divergence never reached the entry threshold.
+strike=None expiration=None realized_vol=None trades=0 pnl=0c declined=0 cf=0c
+_watched, nothing traded — that is data_

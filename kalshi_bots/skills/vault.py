@@ -6,7 +6,6 @@ reads vault files directly on a live cycle.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import threading
 import time
@@ -14,6 +13,53 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+# ---------------------------------------------------------------------------
+# Platform-specific file locking
+# ---------------------------------------------------------------------------
+#
+# Linux/Unix keeps the existing fcntl implementation.
+# Windows uses msvcrt.locking instead.
+#
+# The rest of Vault does not need to know which operating system it is running
+# on. Both implementations provide the same acquire/release behavior.
+# ---------------------------------------------------------------------------
+
+if os.name == "nt":
+    import msvcrt
+
+    def _try_lock_file(lock_file):
+        """Attempt a non-blocking exclusive lock on Windows."""
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+
+    def _unlock_file(lock_file):
+        """Release the Windows file lock."""
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
+else:
+    import fcntl
+
+    def _try_lock_file(lock_file):
+        """Attempt a non-blocking exclusive lock on Linux/Unix."""
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def _unlock_file(lock_file):
+        """Release the Linux/Unix file lock."""
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+
 
 from kalshi_bots.types import VaultNote, VaultQuery
 
@@ -155,26 +201,34 @@ class Vault:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         lock_target = abs_path.with_suffix(abs_path.suffix + ".lock")
         deadline = time.monotonic() + LOCK_TIMEOUT
+
         with open(lock_target, "w") as lf:
             while True:
-                try:
-                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if _try_lock_file(lf):
                     break
-                except BlockingIOError:
-                    if time.monotonic() > deadline:
-                        self.invalidate(path)
-                        raise VaultLockTimeout(path) from None
-                    time.sleep(0.05)
+
+                if time.monotonic() > deadline:
+                    self.invalidate(path)
+                    raise VaultLockTimeout(path) from None
+
+                time.sleep(0.05)
+
             try:
                 tmp = abs_path.with_suffix(abs_path.suffix + ".tmp")
                 tmp.write_text(content, encoding="utf-8")
-                os.rename(tmp, abs_path)
+
+                if os.name == "nt":
+                    os.replace(tmp, abs_path)
+                else:
+                    os.rename(tmp, abs_path)
             finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+                _unlock_file(lf)
+
         try:
             lock_target.unlink()
         except OSError:
             pass
+
         note_fm, note_body = _split_frontmatter(content)
         with self._lock:
             self._cache[path] = (

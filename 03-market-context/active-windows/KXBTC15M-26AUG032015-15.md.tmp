@@ -1,0 +1,19 @@
+---
+series_ticker: KXBTC15M
+event_id: KXBTC15M-26AUG032015
+market_ticker: KXBTC15M-26AUG032015-15
+opens_at: '2026-08-04T00:00:00+00:00'
+closes_at: '2026-08-04T00:15:00+00:00'
+strike: 63462.62
+phase: midpoint
+spot: 63462.035
+sigma: null
+updated: '2026-08-04T00:06:26.824787+00:00'
+settled_result: 'no'
+expiration_value: 63426.57
+settled_direction: down
+---
+# Window KXBTC15M-26AUG032015-15
+
+## Signals
+- LOG {"ts": "2026-08-04T00:06:26.824787+00:00", "phase": "midpoint", "spot": 63462.035, "sigma": null, "healthy": 5, "total": 5, "yes_bid": null, "yes_ask": null}
